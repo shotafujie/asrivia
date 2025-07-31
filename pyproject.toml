@@ -8,3 +8,8 @@ dependencies = [
     "mlx-whisper>=0.4.2",
     "pyaudio>=0.2.14",
 ]
+
+[tool.uv.workspace]
+members = [
+    "asrivia",
+]

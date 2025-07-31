@@ -8,6 +8,17 @@ resolution-markers = [
     "python_full_version < '3.10'",
 ]
 
+[manifest]
+members = [
+    "asrivia",
+    "whisper",
+]
+
+[[package]]
+name = "asrivia"
+version = "0.1.0"
+source = { virtual = "asrivia" }
+
 [[package]]
 name = "certifi"
 version = "2025.7.14"
