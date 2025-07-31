@@ -1,0 +1,71 @@
+name: Sync Specific Files to Organization Repo
+
+# ワークフローが実行されるタイミング (mainブランチへのpush時)
+on:
+  push:
+    branches:
+      - main # あなたのデフォルトブランチ名に合わせて変更してください
+
+jobs:
+  sync-files:
+    # コミットメッセージに '[org-push]' が含まれている場合のみジョブを実行
+    if: contains(github.event.head_commit.message, '[org-push]')
+    
+    runs-on: ubuntu-latest
+    
+    steps:
+      # 1. 個人のリポジトリをチェックアウト
+      - name: Checkout personal repository
+        uses: actions/checkout@v4
+
+      # 2. 特定のファイルをOrganizationのリポジトリにpush
+      - name: Push specific files to organization repository
+        run: |
+          # --- 設定項目 ---
+          # Organizationのリポジトリを指定
+          ORG_REPO="the-spaces/asrivia"
+          
+          # 同期したいファイルを一行ずつ記述
+          FILES_TO_SYNC="
+          README.md
+          main.py
+          audio2wav.py
+          "
+          
+          # --- 設定はここまで ---
+
+          echo "Cloning organization repository..."
+          # Personal Access Tokenを使ってOrganizationのリポジトリをクローン
+          git clone https://x-access-token:${{ secrets.ORG_ACCESS_TOKEN }}@github.com/${ORG_REPO}.git org_repo
+          
+          echo "Copying files..."
+          # 指定されたファイルを個人のリポジトリからOrganizationのリポジトリのクローンへコピー
+          # GITHUB_WORKSPACEはワークフローがチェックアウトした個人のリポジトリのルートを指す
+          echo "$FILES_TO_SYNC" | while read -r file; do
+            if [ -f "$GITHUB_WORKSPACE/$file" ]; then
+              # コピー先のディレクトリが存在しない場合は作成
+              mkdir -p "$(dirname "org_repo/$file")"
+              cp "$GITHUB_WORKSPACE/$file" "org_repo/$file"
+              echo "Copied: $file"
+            else
+              echo "Warning: File not found in personal repo - $file"
+            fi
+          done
+          
+          cd org_repo
+          
+          # Gitのユーザー情報を設定
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          
+          # 変更があるか確認
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Changes detected. Committing and pushing..."
+            git add .
+            # どのコミットから同期されたか分かるようにメッセージを設定
+            git commit -m "Sync: Update files from personal repository" -m "Original commit: ${{ github.event.head_commit.url }}"
+            git push
+            echo "Push successful!"
+          else
+            echo "No changes to push."
+          fi
