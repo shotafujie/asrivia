@@ -1,15 +1,15 @@
+import torch
+from silero_vad import get_speech_timestamps, load_silero_vad
 import mlx_whisper
 import time
 import audio2wav
 import threading
 import queue
 import tkinter as tk
-import torch
-import silero_vad
-from silero_vad import load_silero_vad, get_speech_timestamps
+import numpy as np
 
 # Load Silero VAD model
-vad_model = load_silero_vad()
+vad_model = load_silero_vad(device='cpu')
 
 def record_audio_thread(audio_q):
     while True:
@@ -29,7 +29,7 @@ def transcribe_audio_thread(audio_q, result_q):
         frame = audio_q.get()
         
         # VAD processing with silero-vad
-        speech_timestamps = get_speech_timestamps(frame, vad_model)
+        speech_timestamps = get_speech_timestamps(frame, vad_model, sampling_rate=16000)
         
         # Skip if no speech detected
         if not speech_timestamps:
@@ -43,9 +43,9 @@ def transcribe_audio_thread(audio_q, result_q):
             end_sample = timestamp['end']
             speech_segments.append(frame[start_sample:end_sample])
         
-        # Concatenate speech segments
+        # Concatenate speech segments using numpy
         if speech_segments:
-            concatenated_audio = torch.cat(speech_segments, dim=0)
+            concatenated_audio = np.concatenate(speech_segments)
             
             text = mlx_whisper.transcribe(
                 concatenated_audio,
@@ -60,34 +60,62 @@ def transcribe_audio_thread(audio_q, result_q):
 
 def start_pip_window(result_q, stop_ev):
     pip = tk.Toplevel()
-    pip.title('認識結果')
-    pip.geometry('400x140+1000+100')
-    pip.attributes('-topmost', True)
+    pip.title("Transcription")
+    pip.geometry("400x300+50+50")
+    pip.attributes("-topmost", True)
+    pip.configure(bg="black")
     
-    font_base = 14
-    font_size = tk.IntVar(value=font_base)
+    text_area = tk.Text(
+        pip, 
+        bg="black", 
+        fg="white", 
+        wrap=tk.WORD,
+        font=("Arial", 12)
+    )
+    text_area.pack(fill=tk.BOTH, expand=True)
     
-    label = tk.Label(pip, text='認識中...', font=('Arial', font_base))
-    label.pack(expand=True, fill='both')
-    
-    # フォントサイズ可変ボタン
-    control_frame = tk.Frame(pip)
-    control_frame.pack(side="bottom", pady=7)
-    
-    minus_btn = tk.Button(control_frame, text="－", width=2, command=lambda: change_font(-2))
-    minus_btn.pack(side="left", padx=3)
-    
-    plus_btn = tk.Button(control_frame, text="＋", width=2, command=lambda: change_font(2))
-    plus_btn.pack(side="left", padx=3)
-    
-    def change_font(diff):
-        # 8〜48の範囲を推奨
-        newsize = max(8, min(48, font_size.get() + diff))
-        font_size.set(newsize)
-        label.config(font=('Arial', newsize))
-    
-    def poll_queue():
+    def update_text():
         try:
             while True:
-                new_text = result_q.get_nowait()
-                label.config(text=new_text)
+                text = result_q.get_nowait()
+                text_area.insert(tk.END, text + "\n")
+                text_area.see(tk.END)
+                result_q.task_done()
+        except queue.Empty:
+            pass
+        
+        if not stop_ev.is_set():
+            pip.after(100, update_text)
+    
+    update_text()
+    pip.mainloop()
+
+def main():
+    audio_q = queue.Queue(maxsize=10)
+    result_q = queue.Queue()
+    stop_ev = threading.Event()
+    
+    # Start threads
+    audio_thread = threading.Thread(target=record_audio_thread, args=(audio_q,))
+    transcribe_thread = threading.Thread(target=transcribe_audio_thread, args=(audio_q, result_q))
+    
+    audio_thread.daemon = True
+    transcribe_thread.daemon = True
+    
+    audio_thread.start()
+    transcribe_thread.start()
+    
+    # Start GUI
+    root = tk.Tk()
+    root.withdraw()  # Hide main window
+    
+    try:
+        start_pip_window(result_q, stop_ev)
+    except KeyboardInterrupt:
+        stop_ev.set()
+        print("\nStopping...")
+    finally:
+        stop_ev.set()
+
+if __name__ == "__main__":
+    main()
