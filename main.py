@@ -5,13 +5,47 @@ import threading
 import queue
 import tkinter as tk
 import argparse
+import subprocess
+import sys
+
+def translate_with_plamo(text, from_lang, to_lang):
+    try:
+        result = subprocess.run(
+            [
+                "plamo-translate",
+                "--from", from_lang,
+                "--to", to_lang,
+                "--input", text
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10
+        )
+        if result.returncode != 0:
+            # 失敗時はエラー詳細を標準エラー出力
+            err = result.stderr.decode().strip()
+            print(f"[PLaMo翻訳エラー]\n{err}", file=sys.stderr)
+            return f"[翻訳エラー]"
+        return result.stdout.decode().strip()
+    except Exception as e:
+        print(f"[PLaMo呼び出し例外]\n{e}", file=sys.stderr)
+        return f"[翻訳エラー: {e}]"
+
+def detect_translation_direction(lang):
+    # Whisper認識言語から翻訳方向を決定
+    if lang in ["ja", "jpn", "japanese"]:
+        return ("ja", "en")
+    elif lang in ["en", "eng", "english"]:
+        return ("en", "ja")
+    else:
+        return (lang, "English")
 
 def record_audio_thread(audio_q):
     while True:
         frame = audio2wav.record_audio()
         audio_q.put(frame)
 
-def transcribe_audio_thread(audio_q, result_q, language_mode):
+def transcribe_audio_thread(audio_q, result_q, language_mode, enable_translate):
     filtered_phrases = [
         "ご視聴ありがとうございました。",
         "おやすみなさい。",
@@ -21,39 +55,46 @@ def transcribe_audio_thread(audio_q, result_q, language_mode):
     ]
     while True:
         frame = audio_q.get()
-        # 言語切り替え
+        # Whisperで音声認識
         if language_mode == "auto":
-            # 自動判定
             text_result = mlx_whisper.transcribe(
                 frame,
                 path_or_hf_repo="mlx-community/whisper-large-v3-turbo",
-                language=None  # 自動判定
+                language=None
             )
         else:
-            # ja/enを明示
             text_result = mlx_whisper.transcribe(
                 frame,
                 path_or_hf_repo="mlx-community/whisper-large-v3-turbo",
                 language=language_mode
             )
         text = text_result["text"]
+        result_lang = text_result.get("language", "")
+        
         if text.strip() and text not in filtered_phrases:
-            result_lang = text_result.get("language", "")
-            # 画面にも現在の認識言語を明示（自動時のみ）
-            if language_mode == "auto" and result_lang:
-                result_q.put(f"[{result_lang.upper()}] {text}")
+            if enable_translate:
+                from_lang, to_lang = detect_translation_direction(result_lang)
+                translation = translate_with_plamo(text, from_lang, to_lang)
+                if language_mode == "auto" and result_lang:
+                    output = f"[{result_lang.upper()}] {text}\n→ [{to_lang}] {translation}"
+                else:
+                    output = f"{text}\n→ {translation}"
             else:
-                result_q.put(text)
+                if language_mode == "auto" and result_lang:
+                    output = f"[{result_lang.upper()}] {text}"
+                else:
+                    output = text
+            result_q.put(output)
         audio_q.task_done()
 
 def start_pip_window(result_q, stop_ev):
     pip = tk.Toplevel()
-    pip.title('認識結果')
-    pip.geometry('400x140+1000+100')
+    pip.title('asrivia')
+    pip.geometry('480x180+1000+100')
     pip.attributes('-topmost', True)
     font_base = 14
     font_size = tk.IntVar(value=font_base)
-    label = tk.Label(pip, text='認識中...', font=('Arial', font_base))
+    label = tk.Label(pip, text='認識中...', font=('Arial', font_base), anchor="w", justify="left")
     label.pack(expand=True, fill='both')
     control_frame = tk.Frame(pip)
     control_frame.pack(side="bottom", pady=7)
@@ -81,12 +122,12 @@ def start_pip_window(result_q, stop_ev):
     pip.mainloop()
 
 def main():
-    # 追加: コマンドライン引数パース
     parser = argparse.ArgumentParser()
     parser.add_argument("--language", choices=["ja", "en", "auto"], default="ja",
                         help="認識言語モード: ja=日本語 en=英語 auto=自動判定")
+    parser.add_argument("--translate", action="store_true",
+                        help="翻訳も実行する（指定しないと翻訳なし）")
     args = parser.parse_args()
-
     root = tk.Tk()
     root.withdraw()
     audio_q = queue.Queue()
@@ -94,7 +135,11 @@ def main():
     stop_ev = threading.Event()
     audio2wav.initialize_recorder()
     threading.Thread(target=record_audio_thread, args=(audio_q,), daemon=True).start()
-    threading.Thread(target=transcribe_audio_thread, args=(audio_q, result_q, args.language), daemon=True).start()
+    threading.Thread(
+        target=transcribe_audio_thread,
+        args=(audio_q, result_q, args.language, args.translate),
+        daemon=True
+    ).start()
     start_pip_window(result_q, stop_ev)
 
 if __name__ == "__main__":
