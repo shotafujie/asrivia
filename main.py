@@ -68,7 +68,7 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
         print("[PyTorch Whisper] モデルのロードが完了しました")
     else:
         raise ValueError(f"未対応のバックエンド: {backend}")
-
+    
     while True:
         try:
             frame = audio_q.get()
@@ -76,16 +76,19 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
             # (1) frame が None ならスキップ
             if frame is None:
                 # 録音データが None なのでスキップ
+                audio_q.task_done()  # 修正: mainブランチに合わせてtask_done()を追加
                 break
             
             # (2) frame が numpy.ndarray でなければスキップ
             if not isinstance(frame, np.ndarray):
                 # 録音データが numpy.ndarray でないのでスキップ
+                audio_q.task_done()  # 修正: mainブランチに合わせてtask_done()を追加
                 continue
             
             # (3) frame.ndim != 1 または frame.size == 0 ならスキップ
             if frame.ndim != 1 or frame.size == 0:
                 # 録音データの次元が不正またはサイズが 0 なのでスキップ
+                audio_q.task_done()  # 修正: mainブランチに合わせてtask_done()を追加
                 continue
             
             # バックエンドに応じて文字起こし処理
@@ -105,38 +108,67 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
                     result = asr_model.transcribe(frame, language=lang_mode)
                 text = result.get("text", "").strip()
                 detected_lang = result.get("language", lang_mode)
-
+            
+            # 修正: mainブランチに合わせてtask_done()を追加
+            audio_q.task_done()
+            
+            # 修正: mainブランチに合わせて空文字列フィルタリング
             if not text:
                 continue
-
+            
             # 翻訳処理
             translated = None
             if enable_translate:
                 from_lang, to_lang = detect_translation_direction(detected_lang)
                 if from_lang and to_lang:
                     translated = translate_with_plamo(text, from_lang, to_lang)
-
+            
             result_q.put((text, translated))
-
         except Exception as e:
             print(f"[文字起こしエラー]\n{e}", file=sys.stderr)
             import traceback
             traceback.print_exc()
+            # 修正: 例外時もtask_done()を呼ぶ
+            audio_q.task_done()
 
 def start_pip_window(result_q, stop_ev):
     pip = tk.Toplevel()
     pip.title("asrivia")
-    pip.geometry("400x150")
+    pip.geometry("500x220")  # 修正: mainブランチに合わせてウィンドウサイズを拡大
     pip.attributes("-topmost", True)
     # 修正: 透明度を標準（1.0 = 不透明）に変更
     pip.attributes("-alpha", 1.0)
-
-    text_label = tk.Label(pip, text="認識結果がここに表示されます", font=("Arial", 14), wraplength=380, justify="left")
+    
+    # 修正: mainブランチに合わせてフォントサイズ調整機能を追加
+    font_size = tk.IntVar(value=14)
+    
+    text_label = tk.Label(pip, text="認識結果がここに表示されます", font=("Arial", 14), wraplength=480, justify="left")
     text_label.pack(pady=10)
-
-    translate_label = tk.Label(pip, text="", font=("Arial", 12), fg="blue", wraplength=380, justify="left")
+    
+    translate_label = tk.Label(pip, text="", font=("Arial", 12), fg="blue", wraplength=480, justify="left")
     translate_label.pack(pady=5)
-
+    
+    # 修正: mainブランチに合わせてフォントサイズ変更関数を追加
+    def change_font(delta):
+        new_size = font_size.get() + delta
+        if new_size < 8:
+            new_size = 8
+        elif new_size > 32:
+            new_size = 32
+        font_size.set(new_size)
+        text_label.config(font=("Arial", new_size))
+        translate_label.config(font=("Arial", max(8, new_size - 2)))
+    
+    # 修正: mainブランチに合わせてボタンフレームを追加
+    button_frame = tk.Frame(pip)
+    button_frame.pack(pady=5)
+    
+    btn_decrease = tk.Button(button_frame, text="フォント縮小", command=lambda: change_font(-2))
+    btn_decrease.pack(side=tk.LEFT, padx=5)
+    
+    btn_increase = tk.Button(button_frame, text="フォント拡大", command=lambda: change_font(2))
+    btn_increase.pack(side=tk.LEFT, padx=5)
+    
     def poll_queue():
         while not result_q.empty():
             try:
@@ -146,13 +178,15 @@ def start_pip_window(result_q, stop_ev):
                     translate_label.config(text=f"翻訳: {translated}")
                 else:
                     translate_label.config(text="")
+                # 修正: mainブランチに合わせてtask_done()を追加
+                result_q.task_done()
             except queue.Empty:
                 pass
         if not stop_ev.is_set():
             pip.after(500, poll_queue)
         else:
             pip.destroy()
-
+    
     poll_queue()
     pip.protocol("WM_DELETE_WINDOW", stop_ev.set)
     pip.mainloop()
@@ -183,13 +217,12 @@ def main():
     
     root = tk.Tk()
     root.withdraw()
-
     audio_q = queue.Queue()
     result_q = queue.Queue()
     stop_ev = threading.Event()
-
+    
     audio2wav.initialize_recorder()
-
+    
     threading.Thread(target=record_audio_thread, args=(audio_q,), daemon=True).start()
     threading.Thread(
         target=transcribe_audio_thread,
