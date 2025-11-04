@@ -9,7 +9,6 @@ import subprocess
 import sys
 import os
 import numpy as np
-
 def translate_with_plamo(text, from_lang, to_lang):
     try:
         result = subprocess.run(
@@ -31,7 +30,6 @@ def translate_with_plamo(text, from_lang, to_lang):
     except Exception as e:
         print(f"[PLaMo呼び出し例外]\n{e}", file=sys.stderr)
         return f"[翻訳エラー: {e}]"
-
 def detect_translation_direction(lang):
     # Whisper認識言語から翻訳方向を決定
     if lang == "ja":
@@ -40,7 +38,6 @@ def detect_translation_direction(lang):
         return ("en", "ja")
     else:
         return (None, None)
-
 def record_audio_thread(audio_q):
     print("[DEBUG] record_audio_thread started", type(audio_q))
     try:
@@ -48,8 +45,9 @@ def record_audio_thread(audio_q):
         # 配列に蓄積してから1D numpy配列として返却する
         frames = []  # フレームを蓄積するリスト
         sample_rate = 16000  # サンプリングレート
-        chunk_duration = 3.0  # 音声チャンクの長さ(秒)
+        chunk_duration = 1.0  # 音声チャンクの長さ(秒)
         target_length = int(sample_rate * chunk_duration)  # 目標サンプル数
+        print(f"[DEBUG] target_length set to {target_length} (chunk_duration={chunk_duration}s)")
         
         for frame in audio2wav.record_audio():
             print("[DEBUG] audio2wav.record_audio() yielded", type(frame), getattr(frame, 'shape', frame), frame)
@@ -61,19 +59,20 @@ def record_audio_thread(audio_q):
             # frameがスカラー値(float32など)の場合は配列に蓄積
             elif isinstance(frame, (float, np.floating, np.number)):
                 frames.append(float(frame))
+                print(f"[DEBUG] frame appended, frames length now: {len(frames)}/{target_length}")
                 # 目標長に達したら1D配列としてqueueにput
                 if len(frames) >= target_length:
                     audio_array = np.array(frames, dtype=np.float32)
                     audio_q.put(audio_array)
-                    print(f"[DEBUG] audio_q.put (accumulated array) shape={audio_array.shape}")
+                    print(f"[DEBUG] ★ audio_q.put (accumulated array) shape={audio_array.shape}, frames_count={len(frames)}")
                     frames = []  # リストをクリア
+                    print(f"[DEBUG] frames cleared, ready for next batch")
             else:
                 # 想定外の型の場合はスキップ
                 print(f"[DEBUG] Unexpected frame type: {type(frame)}, skipping")
                 
     except Exception as e:
         print(f"[録音エラー]\n{e}", file=sys.stderr)
-
 def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, backend, model_name):
     print(f"[DEBUG] transcribe_audio_thread started backend={backend} model_name={model_name}", type(audio_q), type(result_q))
     """
@@ -155,7 +154,6 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
             import traceback
             traceback.print_exc()
             audio_q.task_done()
-
 def start_pip_window(result_q, stop_ev):
     print("[DEBUG] start_pip_window called", type(result_q), type(stop_ev))
     pip = tk.Toplevel()
@@ -213,7 +211,6 @@ def start_pip_window(result_q, stop_ev):
     poll_queue()
     pip.protocol("WM_DELETE_WINDOW", stop_ev.set)
     pip.mainloop()
-
 def main():
     print("[DEBUG] main() start")
     parser = argparse.ArgumentParser()
@@ -259,6 +256,5 @@ def main():
     
     start_pip_window(result_q, stop_ev)
     print("[DEBUG] main() end")
-
 if __name__ == "__main__":
     main()
