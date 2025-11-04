@@ -8,6 +8,7 @@ import argparse
 import subprocess
 import sys
 import os
+
 def translate_with_plamo(text, from_lang, to_lang):
     try:
         result = subprocess.run(
@@ -29,14 +30,17 @@ def translate_with_plamo(text, from_lang, to_lang):
     except Exception as e:
         print(f"[PLaMo呼び出し例外]\n{e}", file=sys.stderr)
         return f"[翻訳エラー: {e}]"
+
 def detect_translation_direction(lang):
     # Whisper認識言語から翻訳方向を決定
+    # plamo-translate仕様に合わせて英語表記へ変更
     if lang == "ja":
-        return ("ja", "en")
+        return ("Japanese", "English")
     elif lang == "en":
-        return ("en", "ja")
+        return ("English", "Japanese")
     else:
         return (None, None)
+
 # mainブランチ準拠: record_audio_thread構造そのままコピー
 def record_audio_thread(audio_q):
     try:
@@ -45,6 +49,7 @@ def record_audio_thread(audio_q):
             audio_q.put(frame)
     except Exception as e:
         print(f"[録音エラー]\n{e}", file=sys.stderr)
+
 # mainブランチ準拠: transcribe_audio_thread構造を統一、backend対応のみ追加
 def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, backend, model_name):
     """
@@ -104,6 +109,7 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
             import traceback
             traceback.print_exc()
             audio_q.task_done()
+
 # mainブランチ準拠: start_pip_window構造そのままコピー
 def start_pip_window(result_q, stop_ev):
     pip = tk.Toplevel()
@@ -115,7 +121,8 @@ def start_pip_window(result_q, stop_ev):
     font_size = tk.IntVar(value=14)
     text_label = tk.Label(pip, text="認識結果がここに表示されます", font=("Arial", 14), wraplength=480, justify="left")
     text_label.pack(pady=10)
-    translate_label = tk.Label(pip, text="", font=("Arial", 12), fg="blue", wraplength=480, justify="left")
+    # 翻訳エラー表示時の読みやすさ向上のため、fg="black"に変更
+    translate_label = tk.Label(pip, text="", font=("Arial", 12), fg="black", wraplength=480, justify="left")
     translate_label.pack(pady=5)
     
     def change_font(delta):
@@ -156,6 +163,7 @@ def start_pip_window(result_q, stop_ev):
     poll_queue()
     pip.protocol("WM_DELETE_WINDOW", stop_ev.set)
     pip.mainloop()
+
 # mainブランチ準拠: main()構造統一、backend/model引数のみ差分
 def main():
     parser = argparse.ArgumentParser()
@@ -195,5 +203,6 @@ def main():
     ).start()
     
     start_pip_window(result_q, stop_ev)
+
 if __name__ == "__main__":
     main()
