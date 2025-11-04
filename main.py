@@ -7,6 +7,7 @@ import tkinter as tk
 import argparse
 import subprocess
 import sys
+import os
 
 def translate_with_plamo(text, from_lang, to_lang):
     try:
@@ -45,7 +46,13 @@ def record_audio_thread(audio_q):
         frame = audio2wav.record_audio()
         audio_q.put(frame)
 
-def transcribe_audio_thread(audio_q, result_q, language_mode, enable_translate):
+# ASRバックエンド分岐処理: mlxまたはopenaiを選択
+def transcribe_audio_thread(audio_q, result_q, language_mode, enable_translate, backend, model_name):
+    """
+    ASR処理スレッド
+    backend: 'mlx' または 'openai'
+    model_name: 使用するモデル名（mlxの場合はHugging Faceリポジトリパス、openaiの場合はモデル名）
+    """
     filtered_phrases = [
         "ご視聴ありがとうございました。",
         "おやすみなさい。",
@@ -53,23 +60,75 @@ def transcribe_audio_thread(audio_q, result_q, language_mode, enable_translate):
         "お疲れ様でした。",
         "お待ちしております。",
     ]
+    
+    # OpenAI APIを使用する場合はクライアント初期化
+    if backend == "openai":
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+        except ImportError:
+            print("Error: openai パッケージがインストールされていません。pip install openai を実行してください。", file=sys.stderr)
+            return
+        except Exception as e:
+            print(f"Error: OpenAI初期化エラー: {e}", file=sys.stderr)
+            return
+    
     while True:
         frame = audio_q.get()
-        # Whisperで音声認識
-        if language_mode == "auto":
-            text_result = mlx_whisper.transcribe(
-                frame,
-                path_or_hf_repo="mlx-community/whisper-large-v3-turbo",
-                language=None
-            )
-        else:
-            text_result = mlx_whisper.transcribe(
-                frame,
-                path_or_hf_repo="mlx-community/whisper-large-v3-turbo",
-                language=language_mode
-            )
-        text = text_result["text"]
-        result_lang = text_result.get("language", "")
+        
+        # バックエンドに応じて音声認識処理を分岐
+        try:
+            if backend == "mlx":
+                # mlx-whisperを使用（ローカルモデル）
+                if language_mode == "auto":
+                    text_result = mlx_whisper.transcribe(
+                        frame,
+                        path_or_hf_repo=model_name,
+                        language=None
+                    )
+                else:
+                    text_result = mlx_whisper.transcribe(
+                        frame,
+                        path_or_hf_repo=model_name,
+                        language=language_mode
+                    )
+                text = text_result["text"]
+                result_lang = text_result.get("language", "")
+                
+            elif backend == "openai":
+                # OpenAI Whisper APIを使用
+                import tempfile
+                # 一時ファイルに音声データを保存
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+                    tmp_file.write(frame)
+                    tmp_path = tmp_file.name
+                
+                try:
+                    with open(tmp_path, "rb") as audio_file:
+                        if language_mode == "auto":
+                            transcription = client.audio.transcriptions.create(
+                                model=model_name,
+                                file=audio_file
+                            )
+                        else:
+                            transcription = client.audio.transcriptions.create(
+                                model=model_name,
+                                file=audio_file,
+                                language=language_mode
+                            )
+                    text = transcription.text
+                    result_lang = language_mode if language_mode != "auto" else ""
+                finally:
+                    os.unlink(tmp_path)
+            else:
+                print(f"Error: 不明なバックエンド: {backend}", file=sys.stderr)
+                audio_q.task_done()
+                continue
+                
+        except Exception as e:
+            print(f"Error: 音声認識エラー ({backend}): {e}", file=sys.stderr)
+            audio_q.task_done()
+            continue
         
         if text.strip() and text not in filtered_phrases:
             if enable_translate:
@@ -127,7 +186,24 @@ def main():
                         help="認識言語モード: ja=日本語 en=英語 auto=自動判定")
     parser.add_argument("--translate", action="store_true",
                         help="翻訳も実行する（指定しないと翻訳なし）")
+    # ASRバックエンド選択引数を追加（デフォルトはmlx）
+    parser.add_argument("--backend", choices=["mlx", "openai"], default="mlx",
+                        help="ASRバックエンド: mlx=ローカル（デフォルト） openai=OpenAI API")
+    # モデル指定引数を追加
+    parser.add_argument("--model", type=str, default=None,
+                        help="使用するモデル名（mlx: HFリポジトリパス、openai: モデル名）")
     args = parser.parse_args()
+    
+    # モデル名のデフォルト値設定
+    if args.model is None:
+        if args.backend == "mlx":
+            args.model = "mlx-community/whisper-large-v3-turbo"  # mlxデフォルトモデル
+        elif args.backend == "openai":
+            args.model = "whisper-1"  # OpenAI デフォルトモデル
+    
+    print(f"ASRバックエンド: {args.backend}")
+    print(f"使用モデル: {args.model}")
+    
     root = tk.Tk()
     root.withdraw()
     audio_q = queue.Queue()
@@ -137,7 +213,7 @@ def main():
     threading.Thread(target=record_audio_thread, args=(audio_q,), daemon=True).start()
     threading.Thread(
         target=transcribe_audio_thread,
-        args=(audio_q, result_q, args.language, args.translate),
+        args=(audio_q, result_q, args.language, args.translate, args.backend, args.model),
         daemon=True
     ).start()
     start_pip_window(result_q, stop_ev)
