@@ -110,6 +110,10 @@ python3 main.py --backend openai --language auto --translate
 python3 main.py --backend openai --model medium
 ```
 
+<img width="495" height="140" alt="image" src="https://github.com/user-attachments/assets/443a3a83-f6b5-422d-80b5-80d786ffe380" />
+
+<img width="501" height="152" alt="image" src="https://github.com/user-attachments/assets/fa9ef46b-4576-47a2-8189-14bbe9dd9c47" />
+
 ## 注意事項
 
 - mlxバックエンドはMac（Apple Silicon）で最適に動作します
