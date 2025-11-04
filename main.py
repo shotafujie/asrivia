@@ -8,6 +8,7 @@ import argparse
 import subprocess
 import sys
 import os
+import numpy as np
 
 def translate_with_plamo(text, from_lang, to_lang):
     try:
@@ -44,8 +45,8 @@ def detect_translation_direction(lang):
 def record_audio_thread(audio_q):
     try:
         # 修正: record_generator()からrecord_audio()へ変更
-        for wav_path in audio2wav.record_audio():
-            audio_q.put(wav_path)
+        for frame in audio2wav.record_audio():
+            audio_q.put(frame)
     except Exception as e:
         print(f"[録音エラー]\n{e}", file=sys.stderr)
 
@@ -70,25 +71,38 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
 
     while True:
         try:
-            wav_path = audio_q.get()
-            if wav_path is None:
+            frame = audio_q.get()
+            
+            # (1) frame が None ならスキップ
+            if frame is None:
+                # 録音データが None なのでスキップ
                 break
-
+            
+            # (2) frame が numpy.ndarray でなければスキップ
+            if not isinstance(frame, np.ndarray):
+                # 録音データが numpy.ndarray でないのでスキップ
+                continue
+            
+            # (3) frame.ndim != 1 または frame.size == 0 ならスキップ
+            if frame.ndim != 1 or frame.size == 0:
+                # 録音データの次元が不正またはサイズが 0 なのでスキップ
+                continue
+            
             # バックエンドに応じて文字起こし処理
             if backend == "mlx":
                 # MLXバックエンド（修正: 事前ロードなし、transcribeで直接モデル名指定）
                 if lang_mode == "auto":
-                    result = mlx_whisper.transcribe(wav_path, path_or_hf_repo=model_name)
+                    result = mlx_whisper.transcribe(frame, path_or_hf_repo=model_name)
                 else:
-                    result = mlx_whisper.transcribe(wav_path, path_or_hf_repo=model_name, language=lang_mode)
+                    result = mlx_whisper.transcribe(frame, path_or_hf_repo=model_name, language=lang_mode)
                 text = result.get("text", "").strip()
                 detected_lang = result.get("language", lang_mode)
             elif backend == "openai":
                 # OpenAIバックエンド: ローカルPyTorch版Whisperライブラリを使用
                 if lang_mode == "auto":
-                    result = asr_model.transcribe(wav_path)
+                    result = asr_model.transcribe(frame)
                 else:
-                    result = asr_model.transcribe(wav_path, language=lang_mode)
+                    result = asr_model.transcribe(frame, language=lang_mode)
                 text = result.get("text", "").strip()
                 detected_lang = result.get("language", lang_mode)
 
