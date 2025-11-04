@@ -1,11 +1,41 @@
 # asrivia
 
 ## できること
+
 - ローカルで文字起こしができます．
 - PiP(Picture-in-Picture)に対応しているので，常に最前面表示で，アプリの上にも重ねて表示することができます．
 - モデルは開発時点で最高の文字起こし精度，速度で機能するwhisper-large-v3-turboを使っています．mlx-whisperなのでMacで動かすことを前提にしています．
 - 日本語-英語間で翻訳ができます．Plamoを使っています．開発者の環境(M4Max, 128GB)では4秒ほどのラグがあります．
-- **ASRバックエンドの選択が可能になりました**：ローカル（mlx）またはOpenAI APIを選択できます．
+- **ASRバックエンドの選択が可能になりました**：ローカル（mlx）またはローカルPyTorch版Whisperを選択できます．
+
+## セットアップ
+
+### mlxバックエンド用
+
+```bash
+pip install mlx-whisper
+```
+
+### openaiバックエンド用（ローカルPyTorch版Whisper）
+
+```bash
+# Whisperライブラリのインストール
+pip install openai-whisper
+
+# PyTorchのインストール
+pip install torch
+
+# ffmpegのインストール（macOS）
+brew install ffmpeg
+
+# ffmpegのインストール（Ubuntu/Debian）
+# sudo apt update && sudo apt install ffmpeg
+
+# ffmpegのインストール（Windows）
+# choco install ffmpeg
+```
+
+初回実行時に、Whisperモデルが自動的にダウンロードされます。
 
 ## 使い方
 
@@ -27,7 +57,7 @@ python3 main.py --language {ja|en|auto} --translate
 ```
 
 - `--translate`: 翻訳を有効にします（デフォルトは翻訳無し）
-  - 日本語→英語、英語→日本語の翻訳が可能です
+  - 日本語→英語、英語→日語の翻訳が可能です
 
 ### ASRバックエンドの選択
 
@@ -39,10 +69,9 @@ python3 main.py --backend {mlx|openai}
   - `mlx`: ローカルでmlx-whisperを使用（デフォルト）
     - Macでの動作に最適化されています
     - インターネット接続不要
-  - `openai`: OpenAI Whisper APIを使用
-    - 環境変数 `OPENAI_API_KEY` の設定が必要です
-    - インターネット接続が必要です
-    - `pip install openai` で事前にパッケージをインストールしてください
+  - `openai`: ローカルPyTorch版Whisperライブラリを使用
+    - インターネット接続不要（初回モデルダウンロード時のみ必要）
+    - クロスプラットフォーム対応（Mac/Linux/Windows）
 
 ### モデルの指定
 
@@ -55,9 +84,9 @@ python3 main.py --model {モデル名}
     - デフォルト: `mlx-community/whisper-large-v3-turbo`
     - Hugging Faceリポジトリパスを指定します
     - 例: `mlx-community/whisper-large-v3`, `mlx-community/whisper-medium`
-  - openaiバックエンドの場合:
-    - デフォルト: `whisper-1`
-    - OpenAIのモデル名を指定します
+  - openaiバックエンド（ローカルPyTorch版Whisper）の場合:
+    - デフォルト: `large-v3-turbo`
+    - 利用可能なモデル: `tiny`, `base`, `small`, `medium`, `large`, `large-v2`, `large-v3`, `large-v3-turbo`
 
 ### 使用例
 
@@ -68,18 +97,20 @@ python3 main.py
 # 自動言語判定で翻訳付き
 python3 main.py --language auto --translate
 
-# OpenAI APIを使用して英語音声認識
+# PyTorch版Whisperを使用して英語音声認識
 python3 main.py --backend openai --language en
 
 # 特定のmlxモデルを使用
 python3 main.py --backend mlx --model mlx-community/whisper-medium
 
-# OpenAI APIで全機能を使用
+# PyTorch版Whisperで全機能を使用
 python3 main.py --backend openai --language auto --translate
+
+# PyTorch版Whisperで特定のモデルを使用
+python3 main.py --backend openai --model medium
 ```
 
 ## 注意事項
 
-- OpenAI APIを使用する場合は、環境変数 `OPENAI_API_KEY` を設定する必要があります
-- OpenAI APIを使用する場合は、`pip install openai` でopenaiパッケージをインストールしてください
 - mlxバックエンドはMac（Apple Silicon）で最適に動作します
+- openaiバックエンド（PyTorch版Whisper）はクロスプラットフォームで動作します
