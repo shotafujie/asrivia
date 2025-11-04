@@ -121,8 +121,8 @@ def start_pip_window(result_q, stop_ev):
     font_size = tk.IntVar(value=14)
     text_label = tk.Label(pip, text="認識結果がここに表示されます", font=("Arial", 14), wraplength=480, justify="left")
     text_label.pack(pady=10)
-    # 翻訳エラー表示時の読みやすさ向上のため、fg="black"に変更
-    translate_label = tk.Label(pip, text="", font=("Arial", 12), fg="black", wraplength=480, justify="left")
+    # mainブランチ準拠: 翻訳結果も同じラベルで表示、文字色を白に変更
+    translate_label = tk.Label(pip, text="", font=("Arial", 12), fg="white", wraplength=480, justify="left")
     translate_label.pack(pady=5)
     
     def change_font(delta):
@@ -147,11 +147,13 @@ def start_pip_window(result_q, stop_ev):
         try:
             while True:
                 text, translated = result_q.get_nowait()
-                text_label.config(text=text)
+                # mainブランチ準拠: 認識結果と翻訳結果を「→」形式で表示
                 if translated:
-                    translate_label.config(text=f"翻訳: {translated}")
+                    text_label.config(text=f"{text}\n→ {translated}")
                 else:
-                    translate_label.config(text="")
+                    text_label.config(text=text)
+                # translate_labelは使用しないので空にする
+                translate_label.config(text="")
                 result_q.task_done()
         except queue.Empty:
             pass
