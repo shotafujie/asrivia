@@ -123,6 +123,8 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
                 if from_lang and to_lang:
                     translated = translate_with_plamo(text, from_lang, to_lang)
             
+            # 修正: 認識結果をキューに登録する際にログ出力
+            print(f"[DEBUG 認識結果] text: {text}, translated: {translated}")
             result_q.put((text, translated))
         except Exception as e:
             print(f"[文字起こしエラー]\n{e}", file=sys.stderr)
@@ -159,20 +161,22 @@ def start_pip_window(result_q, stop_ev):
         text_label.config(font=("Arial", new_size))
         translate_label.config(font=("Arial", max(8, new_size - 2)))
     
-    # 修正: mainブランチに合わせてボタンフレームを追加
+    # 修正: mainブランチに合わせてボタンフレームを画面下部に配置し、ラベルを「－」「＋」に変更
     button_frame = tk.Frame(pip)
-    button_frame.pack(pady=5)
+    button_frame.pack(side=tk.BOTTOM, pady=5)
     
-    btn_decrease = tk.Button(button_frame, text="フォント縮小", command=lambda: change_font(-2))
+    btn_decrease = tk.Button(button_frame, text="－", command=lambda: change_font(-2))
     btn_decrease.pack(side=tk.LEFT, padx=5)
     
-    btn_increase = tk.Button(button_frame, text="フォント拡大", command=lambda: change_font(2))
+    btn_increase = tk.Button(button_frame, text="＋", command=lambda: change_font(2))
     btn_increase.pack(side=tk.LEFT, padx=5)
     
     def poll_queue():
         while not result_q.empty():
             try:
                 text, translated = result_q.get_nowait()
+                # 修正: 認識結果をキューから取得した際にログ出力
+                print(f"[DEBUG 表示更新] text: {text}, translated: {translated}")
                 text_label.config(text=text)
                 if translated:
                     translate_label.config(text=f"翻訳: {translated}")
