@@ -43,7 +43,8 @@ def detect_translation_direction(lang):
 
 def record_audio_thread(audio_q):
     try:
-        for wav_path in audio2wav.record_generator():
+        # 修正: record_generator()からrecord_audio()へ変更
+        for wav_path in audio2wav.record_audio():
             audio_q.put(wav_path)
     except Exception as e:
         print(f"[録音エラー]\n{e}", file=sys.stderr)
@@ -56,10 +57,8 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
     """
     # バックエンドごとの初期化
     if backend == "mlx":
-        # MLXバックエンド: mlx_whisperを使用
-        print(f"[MLX] モデルをロード中: {model_name}")
-        asr_model = mlx_whisper.load(model_name)
-        print("[MLX] モデルのロードが完了しました")
+        # MLXバックエンド: mlx_whisperを使用（修正: 事前ロードなし、transcribe時に直接モデル名を指定）
+        print(f"[MLX] モデル: {model_name}")
     elif backend == "openai":
         # OpenAIバックエンド: ローカルPyTorch版Whisperライブラリを使用
         import whisper
@@ -77,7 +76,7 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
 
             # バックエンドに応じて文字起こし処理
             if backend == "mlx":
-                # MLXバックエンド
+                # MLXバックエンド（修正: 事前ロードなし、transcribeで直接モデル名指定）
                 if lang_mode == "auto":
                     result = mlx_whisper.transcribe(wav_path, path_or_hf_repo=model_name)
                 else:
@@ -115,7 +114,8 @@ def start_pip_window(result_q, stop_ev):
     pip.title("asrivia")
     pip.geometry("400x150")
     pip.attributes("-topmost", True)
-    pip.attributes("-alpha", 0.9)
+    # 修正: 透明度を標準（1.0 = 不透明）に変更
+    pip.attributes("-alpha", 1.0)
 
     text_label = tk.Label(pip, text="認識結果がここに表示されます", font=("Arial", 14), wraplength=380, justify="left")
     text_label.pack(pady=10)
@@ -155,7 +155,6 @@ def main():
     # モデル指定引数を追加
     parser.add_argument("--model", type=str, default=None,
                         help="使用するモデル名（mlx: HFリポジトリパス、openai: Whisperモデル名）")
-
     args = parser.parse_args()
     
     # モデル名のデフォルト値設定
