@@ -45,7 +45,7 @@ def record_audio_thread(audio_q):
         # 配列に蓄積してから1D numpy配列として返却する
         frames = []  # フレームを蓄積するリスト
         sample_rate = 16000  # サンプリングレート
-        chunk_duration = 1.0  # 音声チャンクの長さ(秒)
+        chunk_duration = 2.0  # 音声チャンクの長さ(秒)
         target_length = int(sample_rate * chunk_duration)  # 目標サンプル数
         print(f"[DEBUG] target_length set to {target_length} (chunk_duration={chunk_duration}s)")
         
