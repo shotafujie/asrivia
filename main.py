@@ -20,7 +20,7 @@ def translate_with_plamo(text, from_lang, to_lang):
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=10
+            timeout=60
         )
         if result.returncode != 0:
             err = result.stderr.decode().strip()
@@ -54,8 +54,8 @@ def record_audio_thread(audio_q):
 def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, backend, model_name):
     """
     音声認識スレッド。バックエンドに応じて処理を切り替える。
-    backend: 'mlx' または 'openai'
-    model_name: 使用するモデル名(mlx: HFリポジトリパス、openai: Whisperモデル名)
+    backend: 'mlx', 'openai', または 'stable-ts'
+    model_name: 使用するモデル名(mlx: HFリポジトリパス、openai/stable-ts: Whisperモデル名)
     """
     # mainブランチ準拠: backend選択のみ差分
     if backend == "mlx":
@@ -65,6 +65,11 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
         print(f"[PyTorch Whisper] モデルをロード中: {model_name}")
         asr_model = whisper.load_model(model_name)
         print("[PyTorch Whisper] モデルのロードが完了しました")
+    elif backend == "stable-ts":
+        import stable_whisper
+        print(f"[Stable-TS] モデルをロード中: {model_name}")
+        asr_model = stable_whisper.load_model(model_name)
+        print("[Stable-TS] モデルのロードが完了しました")
     else:
         raise ValueError(f"未対応のバックエンド: {backend}")
     
@@ -86,6 +91,22 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
                     result = asr_model.transcribe(frame)
                 else:
                     result = asr_model.transcribe(frame, language=lang_mode)
+            elif backend == "stable-ts":
+                # stable-ts: VAD有効化、condition_on_previous_text=False でハルシネーション軽減
+                transcribe_options = {
+                    "vad": "silero",
+                    "condition_on_previous_text": False,
+                    "word_timestamps": False,
+                    "verbose": False,
+                }
+                if lang_mode != "auto":
+                    transcribe_options["language"] = lang_mode
+                stable_result = asr_model.transcribe(frame, **transcribe_options)
+                # stable-ts の結果を Whisper 互換形式に変換
+                result = {
+                    "text": stable_result.text if hasattr(stable_result, 'text') else str(stable_result),
+                    "language": stable_result.language if hasattr(stable_result, 'language') else lang_mode,
+                }
             
             text = result.get("text", "").strip()
             detected_lang = result.get("language", lang_mode)
@@ -158,7 +179,7 @@ def start_pip_window(result_q, stop_ev):
         except queue.Empty:
             pass
         if not stop_ev.is_set():
-            pip.after(500, poll_queue)
+            pip.after(250, poll_queue)
         else:
             pip.destroy()
     
@@ -172,7 +193,7 @@ def main():
     parser.add_argument("--language", choices=["ja", "en", "auto"], default="ja", help="認識言語モード: ja=日本語 en=英語 auto=自動判定")
     parser.add_argument("--translate", action="store_true", help="翻訳も実行する(指定しないと翻訳なし)")
     # mainブランチ準拠: backend/model引数のみ差分
-    parser.add_argument("--backend", choices=["mlx", "openai"], default="mlx", help="ASRバックエンド: mlx=ローカル(デフォルト) openai=ローカルPyTorch版Whisper")
+    parser.add_argument("--backend", choices=["mlx", "openai", "stable-ts"], default="mlx", help="ASRバックエンド: mlx=ローカル(デフォルト) openai=ローカルPyTorch版Whisper stable-ts=Whisper+VAD")
     parser.add_argument("--model", type=str, default=None, help="使用するモデル名(mlx: HFリポジトリパス、openai: Whisperモデル名)")
     args = parser.parse_args()
     
@@ -181,6 +202,8 @@ def main():
         if args.backend == "mlx":
             args.model = "mlx-community/whisper-large-v3-turbo"
         elif args.backend == "openai":
+            args.model = "large-v3-turbo"
+        elif args.backend == "stable-ts":
             args.model = "large-v3-turbo"
     
     print(f"ASRバックエンド: {args.backend}")
