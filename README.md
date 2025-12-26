@@ -1,22 +1,51 @@
 # asrivia
 
-## できること
+ローカルで動作する音声認識・翻訳アプリケーション。Whisperを使用したリアルタイム文字起こしと、日本語-英語間の翻訳機能を提供します。
 
-- ローカルで文字起こしができます．
-- PiP(Picture-in-Picture)に対応しているので，常に最前面表示で，アプリの上にも重ねて表示することができます．
-- モデルは開発時点で最高の文字起こし精度，速度で機能するwhisper-large-v3-turboを使っています．mlx-whisperなのでMacで動かすことを前提にしています．
-- 日本語-英語間で翻訳ができます．Plamoを使っています．開発者の環境(M4Max, 128GB)では4秒ほどのラグがあります．
-- **ASRバックエンドの選択が可能になりました**：ローカル（mlx）またはローカルPyTorch版Whisperを選択できます．
+## 主な機能
+
+- **リアルタイム音声認識**: Whisperによる高精度な文字起こし
+- **PiPウィンドウ表示**: 常に最前面に表示され、他のアプリケーションの上に重ねて使用可能
+- **日英翻訳**: PLaMoを使用した日本語↔英語の翻訳
+- **複数バックエンド対応**: MLX（Mac最適化）またはPyTorch版Whisperを選択可能
+- **言語自動判定**: 日本語/英語を自動で判別
+- **動的セグメンテーション**: 発話終了を自動検知して即座に認識処理を開始（低遅延モード）
+
+## 前提条件
+
+### ハードウェア要件
+
+| バックエンド | 対応環境 | 推奨メモリ |
+|-------------|---------|-----------|
+| MLX | macOS（Apple Silicon） | 16GB以上 |
+| PyTorch（openai） | macOS / Linux / Windows | 16GB以上 |
+
+### ソフトウェア要件
+
+- Python 3.9以上
+- ffmpeg（openaiバックエンド使用時）
 
 ## セットアップ
 
-### mlxバックエンド用
+### uvを使用する場合（推奨）
 
 ```bash
-pip install mlx-whisper
+# 依存関係のインストール
+uv sync
+
+# 実行
+uv run python main.py
 ```
 
-### openaiバックエンド用（ローカルPyTorch版Whisper）
+### pipを使用する場合
+
+#### mlxバックエンド用
+
+```bash
+pip install mlx-whisper pyaudio
+```
+
+#### openaiバックエンド用（ローカルPyTorch版Whisper）
 
 ```bash
 # Whisperライブラリのインストール
@@ -37,15 +66,22 @@ brew install ffmpeg
 
 初回実行時に、Whisperモデルが自動的にダウンロードされます。
 
+### 翻訳機能を使用する場合
+
+```bash
+# PLaMo翻訳ツールのインストール
+pip install plamo-translate
+```
+
 ## 使い方
 
 ### 基本的な使い方
 
 ```bash
-python3 main.py --language {ja|en|auto}
+python main.py --language {ja|en|auto}
 ```
 
-- `--language`: 認識言語モードを指定します
+- `--language`: 認識言語モードを指定
   - `ja`: 日本語のみ（デフォルト）
   - `en`: 英語のみ
   - `auto`: 自動判定
@@ -53,71 +89,139 @@ python3 main.py --language {ja|en|auto}
 ### 翻訳機能
 
 ```bash
-python3 main.py --language {ja|en|auto} --translate
+python main.py --language {ja|en|auto} --translate
 ```
 
-- `--translate`: 翻訳を有効にします（デフォルトは翻訳無し）
-  - 日本語→英語、英語→日語の翻訳が可能です
+- `--translate`: 翻訳を有効化
+  - 日本語→英語、英語→日本語の翻訳が可能
 
 ### ASRバックエンドの選択
 
 ```bash
-python3 main.py --backend {mlx|openai}
+python main.py --backend {mlx|openai}
 ```
 
-- `--backend`: ASRバックエンドを指定します
-  - `mlx`: ローカルでmlx-whisperを使用（デフォルト）
-    - Macでの動作に最適化されています
-    - インターネット接続不要
-  - `openai`: ローカルPyTorch版Whisperライブラリを使用
-    - インターネット接続不要（初回モデルダウンロード時のみ必要）
-    - クロスプラットフォーム対応（Mac/Linux/Windows）
+- `--backend`: ASRバックエンドを指定
+  - `mlx`: mlx-whisperを使用（デフォルト、Mac最適化）
+  - `openai`: PyTorch版Whisperを使用（クロスプラットフォーム）
 
 ### モデルの指定
 
 ```bash
-python3 main.py --model {モデル名}
+python main.py --model {モデル名}
 ```
 
-- `--model`: 使用するモデルを指定します
-  - mlxバックエンドの場合:
+- `--model`: 使用するモデルを指定
+  - mlxバックエンド: Hugging Faceリポジトリパス
     - デフォルト: `mlx-community/whisper-large-v3-turbo`
-    - Hugging Faceリポジトリパスを指定します
     - 例: `mlx-community/whisper-large-v3`, `mlx-community/whisper-medium`
-  - openaiバックエンド（ローカルPyTorch版Whisper）の場合:
+  - openaiバックエンド: Whisperモデル名
     - デフォルト: `large-v3-turbo`
-    - 利用可能なモデル: `tiny`, `base`, `small`, `medium`, `large`, `large-v2`, `large-v3`, `large-v3-turbo`
+    - 利用可能: `tiny`, `base`, `small`, `medium`, `large`, `large-v2`, `large-v3`, `large-v3-turbo`
+
+### 動的セグメンテーション（低遅延モード）
+
+通常モードでは3秒ごとに音声を処理しますが、動的セグメンテーションを有効にすると、発話終了を自動検知して即座に認識処理を開始します。
+
+```bash
+python main.py --dynamic-vad
+```
+
+#### パラメータの調整
+
+| オプション | 説明 | デフォルト |
+|-----------|------|-----------|
+| `--dynamic-vad` | 動的セグメンテーションを有効化 | 無効 |
+| `--silence-threshold` | 無音判定閾値（小さいほど敏感） | 0.01 |
+| `--silence-duration` | 発話終了と判定する無音継続時間（秒） | 0.5 |
+| `--min-record` | 最小録音時間（秒） | 0.5 |
+| `--max-record` | 最大録音時間（秒） | 5.0 |
+| `--overlap` | 次のセグメントとのオーバーラップ時間（秒） | 0.0 |
+
+```bash
+# 動的VADを有効化（デフォルト設定）
+python main.py --dynamic-vad
+
+# 発話終了検知を早める（0.3秒の無音で終了判定）
+python main.py --dynamic-vad --silence-duration 0.3
+
+# オーバーラップを有効化して文脈の途切れを防ぐ
+python main.py --dynamic-vad --overlap 0.5
+
+# 全パラメータをカスタマイズ
+python main.py --dynamic-vad --silence-threshold 0.02 --silence-duration 0.4 --min-record 0.3 --max-record 4.0 --overlap 0.3
+```
 
 ### 使用例
 
 ```bash
 # ローカルで日本語音声認識（デフォルト設定）
-python3 main.py
+python main.py
+
+# 動的VADで低遅延認識
+python main.py --dynamic-vad
 
 # 自動言語判定で翻訳付き
-python3 main.py --language auto --translate
+python main.py --language auto --translate
+
+# 動的VAD + 翻訳
+python main.py --dynamic-vad --language auto --translate
 
 # PyTorch版Whisperを使用して英語音声認識
-python3 main.py --backend openai --language en
+python main.py --backend openai --language en
 
 # 特定のmlxモデルを使用
-python3 main.py --backend mlx --model mlx-community/whisper-medium
+python main.py --backend mlx --model mlx-community/whisper-medium
 
 # PyTorch版Whisperで全機能を使用
-python3 main.py --backend openai --language auto --translate
+python main.py --backend openai --language auto --translate
 
 # PyTorch版Whisperで特定のモデルを使用
-python3 main.py --backend openai --model medium
+python main.py --backend openai --model medium
 ```
 
 <img width="495" height="140" alt="image" src="https://github.com/user-attachments/assets/443a3a83-f6b5-422d-80b5-80d786ffe380" />
 
 <img width="501" height="152" alt="image" src="https://github.com/user-attachments/assets/fa9ef46b-4576-47a2-8189-14bbe9dd9c47" />
 
-## 注意事項
+## PiPウィンドウの操作
 
-- mlxバックエンドはMac（Apple Silicon）で最適に動作します
-- openaiバックエンド（PyTorch版Whisper）はクロスプラットフォームで動作します
+- ウィンドウは常に最前面に表示されます
+- `＋`/`－`ボタンでフォントサイズを調整可能（8〜32pt）
+- ウィンドウを閉じるとアプリケーションが終了します
+
+## トラブルシューティング
+
+### 音声が認識されない
+
+1. マイクの権限を確認してください（システム環境設定 → プライバシーとセキュリティ → マイク）
+2. 正しい入力デバイスが選択されているか確認してください
+
+### モデルのダウンロードに失敗する
+
+- インターネット接続を確認してください
+- 初回起動時はモデルのダウンロードに時間がかかります
+
+### PyTorch版で「ffmpeg not found」エラー
+
+```bash
+# macOS
+brew install ffmpeg
+
+# Ubuntu/Debian
+sudo apt update && sudo apt install ffmpeg
+```
+
+### 翻訳が動作しない
+
+- `plamo-translate`がインストールされているか確認してください
+- PLaMoが正しくセットアップされているか確認してください
+
+## 制限事項
+
+- mlxバックエンドはApple Silicon Mac専用です
+- 翻訳機能（PLaMo）はローカルで動作するため、マシンスペックによって処理時間が変わります（M4 Max, 128GBで約4秒のラグ）
+- 通常モードでは3秒ごとに音声を認識するため、リアルタイム性には若干の遅延があります（`--dynamic-vad`で軽減可能）
 
 ---
 

@@ -195,6 +195,13 @@ def main():
     # mainブランチ準拠: backend/model引数のみ差分
     parser.add_argument("--backend", choices=["mlx", "openai", "stable-ts"], default="mlx", help="ASRバックエンド: mlx=ローカル(デフォルト) openai=ローカルPyTorch版Whisper stable-ts=Whisper+VAD")
     parser.add_argument("--model", type=str, default=None, help="使用するモデル名(mlx: HFリポジトリパス、openai: Whisperモデル名)")
+    # 動的セグメンテーション関連オプション
+    parser.add_argument("--dynamic-vad", action="store_true", help="VADベースの動的セグメンテーションを有効化")
+    parser.add_argument("--silence-threshold", type=float, default=0.01, help="無音判定閾値 (default: 0.01)")
+    parser.add_argument("--silence-duration", type=float, default=0.5, help="無音継続時間[秒] (default: 0.5)")
+    parser.add_argument("--min-record", type=float, default=0.5, help="最小録音時間[秒] (default: 0.5)")
+    parser.add_argument("--max-record", type=float, default=5.0, help="最大録音時間[秒] (default: 5.0)")
+    parser.add_argument("--overlap", type=float, default=0.0, help="オーバーラップ時間[秒] (default: 0.0)")
     args = parser.parse_args()
     
     # mainブランチ準拠: デフォルトモデル設定のみ差分
@@ -208,15 +215,27 @@ def main():
     
     print(f"ASRバックエンド: {args.backend}")
     print(f"使用モデル: {args.model}")
-    
+
     root = tk.Tk()
     root.withdraw()
-    
+
     audio_q = queue.Queue()
     result_q = queue.Queue()
     stop_ev = threading.Event()
-    
-    audio2wav.initialize_recorder()
+
+    # レコーダー初期化
+    if args.dynamic_vad:
+        print(f"[動的VAD] 有効 (無音閾値: {args.silence_threshold}, 無音時間: {args.silence_duration}s, 最小: {args.min_record}s, 最大: {args.max_record}s, オーバーラップ: {args.overlap}s)")
+        audio2wav.initialize_recorder(
+            mode="dynamic",
+            silence_threshold=args.silence_threshold,
+            silence_duration=args.silence_duration,
+            min_record_seconds=args.min_record,
+            max_record_seconds=args.max_record,
+            overlap_seconds=args.overlap
+        )
+    else:
+        audio2wav.initialize_recorder(mode="fixed")
     
     # mainブランチ準拠: スレッド起動構造そのままコピー
     threading.Thread(target=record_audio_thread, args=(audio_q,), daemon=True).start()
