@@ -51,13 +51,12 @@ def record_audio_thread(audio_q):
         print(f"[録音エラー]\n{e}", file=sys.stderr)
 
 # mainブランチ準拠: transcribe_audio_thread構造を統一、backend対応のみ追加
-def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, backend, model_name):
+def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, backend, model_name, oov_queue=None):
     """
     音声認識スレッド。バックエンドに応じて処理を切り替える。
-    backend: 'mlx', 'openai', または 'stable-ts'
-    model_name: 使用するモデル名(mlx: HFリポジトリパス、openai/stable-ts: Whisperモデル名)
+    backend: 'mlx', 'openai', 'stable-ts', または 'hf'
+    model_name: 使用するモデル名
     """
-    # mainブランチ準拠: backend選択のみ差分
     if backend == "mlx":
         print(f"[MLX] モデル: {model_name}")
     elif backend == "openai":
@@ -70,6 +69,13 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
         print(f"[Stable-TS] モデルをロード中: {model_name}")
         asr_model = stable_whisper.load_model(model_name)
         print("[Stable-TS] モデルのロードが完了しました")
+    elif backend == "hf":
+        from asr.biased_whisper import BiasingWhisperBackend
+        asr_model = BiasingWhisperBackend(
+            model_name=model_name,
+            language=lang_mode,
+            registry_path="words.json",
+        )
     else:
         raise ValueError(f"未対応のバックエンド: {backend}")
     
@@ -107,6 +113,12 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
                     "text": stable_result.text if hasattr(stable_result, 'text') else str(stable_result),
                     "language": stable_result.language if hasattr(stable_result, 'language') else lang_mode,
                 }
+            elif backend == "hf":
+                result = asr_model.transcribe(frame)
+                # OOV候補をoov_queueに送信
+                if hasattr(asr_model, 'oov_candidates') and asr_model.oov_candidates:
+                    if oov_queue is not None:
+                        oov_queue.put(list(asr_model.oov_candidates))
             
             text = result.get("text", "").strip()
             detected_lang = result.get("language", lang_mode)
@@ -131,8 +143,7 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
             traceback.print_exc()
             audio_q.task_done()
 
-# mainブランチ準拠: start_pip_window構造そのままコピー
-def start_pip_window(result_q, stop_ev):
+def start_pip_window(result_q, stop_ev, backend=None, registry=None, reload_cb=None, oov_queue=None):
     pip = tk.Toplevel()
     pip.title("asrivia")
     pip.geometry("500x110")
@@ -162,6 +173,14 @@ def start_pip_window(result_q, stop_ev):
     btn_decrease.pack(side=tk.LEFT, padx=5)
     btn_increase = tk.Button(button_frame, text="＋", command=lambda: change_font(2))
     btn_increase.pack(side=tk.LEFT, padx=5)
+
+    # 辞書ボタン（hfバックエンド時のみ表示）
+    if backend == "hf" and registry is not None:
+        from asr.dict_window import DictWindow
+        def open_dict_window():
+            DictWindow(pip, registry, reload_cb, oov_queue)
+        btn_dict = tk.Button(button_frame, text="📚", command=open_dict_window)
+        btn_dict.pack(side=tk.LEFT, padx=5)
     
     # mainブランチ準拠: poll_queue構造そのままコピー
     def poll_queue():
@@ -193,7 +212,8 @@ def main():
     parser.add_argument("--language", choices=["ja", "en", "auto"], default="ja", help="認識言語モード: ja=日本語 en=英語 auto=自動判定")
     parser.add_argument("--translate", action="store_true", help="翻訳も実行する(指定しないと翻訳なし)")
     # mainブランチ準拠: backend/model引数のみ差分
-    parser.add_argument("--backend", choices=["mlx", "openai", "stable-ts"], default="mlx", help="ASRバックエンド: mlx=ローカル(デフォルト) openai=ローカルPyTorch版Whisper stable-ts=Whisper+VAD")
+    parser.add_argument("--backend", choices=["mlx", "openai", "stable-ts", "hf"], default="mlx", help="ASRバックエンド: mlx=ローカル(デフォルト) openai=ローカルPyTorch版Whisper stable-ts=Whisper+VAD hf=HuggingFace Whisper+biasing")
+    parser.add_argument("--dict", action="store_true", dest="dict_only", help="辞書登録UIのみ起動（ASRなし）")
     parser.add_argument("--model", type=str, default=None, help="使用するモデル名(mlx: HFリポジトリパス、openai: Whisperモデル名)")
     # 動的セグメンテーション関連オプション
     parser.add_argument("--dynamic-vad", action="store_true", help="VADベースの動的セグメンテーションを有効化")
@@ -204,7 +224,7 @@ def main():
     parser.add_argument("--overlap", type=float, default=0.0, help="オーバーラップ時間[秒] (default: 0.0)")
     args = parser.parse_args()
     
-    # mainブランチ準拠: デフォルトモデル設定のみ差分
+    # デフォルトモデル設定
     if args.model is None:
         if args.backend == "mlx":
             args.model = "mlx-community/whisper-large-v3-turbo"
@@ -212,6 +232,8 @@ def main():
             args.model = "large-v3-turbo"
         elif args.backend == "stable-ts":
             args.model = "large-v3-turbo"
+        elif args.backend == "hf":
+            args.model = "openai/whisper-large-v3-turbo"
     
     print(f"ASRバックエンド: {args.backend}")
     print(f"使用モデル: {args.model}")
@@ -219,9 +241,23 @@ def main():
     root = tk.Tk()
     root.withdraw()
 
+    # --dict モード: 辞書UIのみ起動
+    if args.dict_only:
+        from asr.biasing import WordRegistry
+        from asr.dict_window import DictWindow
+        registry = WordRegistry.load("words.json")
+        DictWindow(root, registry)
+        root.mainloop()
+        return
+
     audio_q = queue.Queue()
     result_q = queue.Queue()
     stop_ev = threading.Event()
+    oov_queue = queue.Queue() if args.backend == "hf" else None
+
+    # hfバックエンド用: registryとreload_cbを事前準備
+    hf_registry = None
+    hf_reload_cb = None
 
     # レコーダー初期化
     if args.dynamic_vad:
@@ -236,17 +272,23 @@ def main():
         )
     else:
         audio2wav.initialize_recorder(mode="fixed")
-    
-    # mainブランチ準拠: スレッド起動構造そのままコピー
+
+    # hfバックエンド: UIからregistryを共有するためにここでロード
+    if args.backend == "hf":
+        from asr.biasing import WordRegistry
+        hf_registry = WordRegistry.load("words.json")
+        # reload_cbはtranscribeスレッド内のbackendに委譲（mtime監視で自動リロード）
+        hf_reload_cb = None  # backend側でmtime監視するため不要
+
     threading.Thread(target=record_audio_thread, args=(audio_q,), daemon=True).start()
-    
+
     threading.Thread(
         target=transcribe_audio_thread,
-        args=(audio_q, result_q, args.language, args.translate, args.backend, args.model),
+        args=(audio_q, result_q, args.language, args.translate, args.backend, args.model, oov_queue),
         daemon=True
     ).start()
-    
-    start_pip_window(result_q, stop_ev)
+
+    start_pip_window(result_q, stop_ev, args.backend, hf_registry, hf_reload_cb, oov_queue)
 
 if __name__ == "__main__":
     main()

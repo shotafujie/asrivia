@@ -8,8 +8,9 @@ dependencies = [
     "mlx-whisper>=0.4.2",
     "pyaudio>=0.2.14",
     "stable-ts>=2.0.0",
-    "torch>=2.0.0",
+    "torch>=2.2",
     "openai-whisper>=20231117",
+    "transformers>=4.40",
 ]
 
 [tool.uv.workspace]
