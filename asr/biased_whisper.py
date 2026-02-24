@@ -147,12 +147,18 @@ class BiasingWhisperBackend:
         if len(self.registry) > 0:
             logits_processors.append(HotwordLogitsProcessor(self.tree))
 
+        # Attention mask (pad_token == eos_token の警告対策)
+        attention_mask = torch.ones(
+            input_features.shape[:-1], dtype=torch.long, device=self.device
+        )
+
         # Generate
         generate_kwargs = {
             "input_features": input_features,
+            "attention_mask": attention_mask,
             "language": self.language if self.language != "auto" else None,
             "return_dict_in_generate": True,
-            "output_scores": True,
+            "output_logits": True,
         }
         if logits_processors:
             generate_kwargs["logits_processor"] = logits_processors
@@ -164,15 +170,15 @@ class BiasingWhisperBackend:
         token_ids = output.sequences[0].tolist()
         text = self.processor.decode(token_ids, skip_special_tokens=True).strip()
 
-        # Extract OOV candidates from scores
+        # Extract OOV candidates from logits
         self.oov_candidates = []
-        if output.scores:
+        if hasattr(output, "logits") and output.logits:
             log_probs = []
-            # output.scores is a tuple of (vocab_size,) tensors per step
+            # output.logits is a tuple of (batch, vocab_size) tensors per step
             generated_ids = token_ids[1:]  # skip decoder start token
-            for step, score_tensor in enumerate(output.scores):
+            for step, logit_tensor in enumerate(output.logits):
                 if step < len(generated_ids):
-                    probs = torch.log_softmax(score_tensor[0], dim=-1)
+                    probs = torch.log_softmax(logit_tensor[0], dim=-1)
                     lp = probs[generated_ids[step]].item()
                     log_probs.append(lp)
 
