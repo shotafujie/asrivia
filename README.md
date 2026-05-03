@@ -6,8 +6,12 @@
 
 - **リアルタイム音声認識**: Whisperによる高精度な文字起こし
 - **PiPウィンドウ表示**: 常に最前面に表示され、他のアプリケーションの上に重ねて使用可能
-- **日英翻訳**: PLaMoを使用した日本語↔英語の翻訳
-- **複数バックエンド対応**: MLX（Mac最適化）またはPyTorch版Whisperを選択可能
+- **日英翻訳**: Opus-MT（軽量・高速）またはTranslateGemma（高品質）を選択可能
+- **非同期翻訳パイプライン**: 認識を待たせず翻訳を別スレッドで実行（バックプレッシャー制御つき）
+- **複数ASRバックエンド対応**: MLX / PyTorch（openai） / stable-ts（VAD付き） / HuggingFace（バイアシング対応）
+- **コンテキストバイアシング**: 専門用語や固有名詞をブースト（HFバックエンドのみ、`words.json`で管理）
+- **入力デバイス選択**: PiPウィンドウからマイク等の入力デバイスを切り替え可能
+- **辞書登録UI**: 認識結果のOOV（未知語）候補からワンクリックで辞書追加
 - **言語自動判定**: 日本語/英語を自動で判別
 - **動的セグメンテーション**: 発話終了を自動検知して即座に認識処理を開始（低遅延モード）
 
@@ -19,6 +23,8 @@
 |-------------|---------|-----------|
 | MLX | macOS（Apple Silicon） | 16GB以上 |
 | PyTorch（openai） | macOS / Linux / Windows | 16GB以上 |
+| stable-ts | macOS / Linux / Windows | 16GB以上 |
+| HuggingFace（hf） | macOS / Linux / Windows（GPUあれば高速） | 16GB以上 |
 
 ### ソフトウェア要件
 
@@ -64,14 +70,30 @@ brew install ffmpeg
 # choco install ffmpeg
 ```
 
+#### stable-tsバックエンド用
+
+```bash
+pip install stable-ts pyaudio
+```
+
+#### hfバックエンド用（HuggingFace Whisper + バイアシング）
+
+```bash
+pip install transformers torch pyaudio
+```
+
 初回実行時に、Whisperモデルが自動的にダウンロードされます。
 
 ### 翻訳機能を使用する場合
 
+翻訳器は2種類から選べます。デフォルトは軽量CPU向けの **Opus-MT**、高品質を求めるなら **TranslateGemma**（GPU推奨）。
+
 ```bash
-# PLaMo翻訳ツールのインストール
-pip install plamo-translate
+# Opus-MT / TranslateGemma 共通: transformers と torch
+pip install transformers torch sentencepiece
 ```
+
+`uv sync` を使う場合は不要です（`pyproject.toml` に含まれています）。
 
 ## 使い方
 
@@ -89,21 +111,52 @@ python main.py --language {ja|en|auto}
 ### 翻訳機能
 
 ```bash
-python main.py --language {ja|en|auto} --translate
+python main.py --language {ja|en|auto} --translate [--translator {opus|gemma}]
 ```
 
-- `--translate`: 翻訳を有効化
-  - 日本語→英語、英語→日本語の翻訳が可能
+- `--translate`: 翻訳を有効化（日本語↔英語）
+- `--translator`: 翻訳器を指定
+  - `opus`: Opus-MT（デフォルト、軽量・高速、CPUでも実用）
+  - `gemma`: TranslateGemma 4B（高品質、GPU推奨）
+
+翻訳は別スレッドで非同期実行されます。認識テキストは即座にPiPに表示され、翻訳は完了次第追記されます。翻訳ジョブが詰まった場合は古いジョブを破棄し、最新の発話を優先します。
 
 ### ASRバックエンドの選択
 
 ```bash
-python main.py --backend {mlx|openai}
+python main.py --backend {mlx|openai|stable-ts|hf}
 ```
 
 - `--backend`: ASRバックエンドを指定
   - `mlx`: mlx-whisperを使用（デフォルト、Mac最適化）
   - `openai`: PyTorch版Whisperを使用（クロスプラットフォーム）
+  - `stable-ts`: Whisper + Silero VAD（ハルシネーション抑制）
+  - `hf`: HuggingFace Whisper + コンテキストバイアシング（専門用語をブースト）
+
+### コンテキストバイアシング（hfバックエンド）
+
+頻出する専門用語・固有名詞をリポジトリ直下の `words.json` に登録すると、認識時にそれらの単語が出やすくなります。
+
+```json
+[
+  {"word": "Agile", "boost": 2.0, "note": ""},
+  {"word": "Kubernetes", "boost": 2.5, "note": "infra"}
+]
+```
+
+- `boost`: 大きいほど強く優先（目安: 1.5〜3.0）
+- ファイルは `mtime` を監視して自動リロードされます
+- PiPウィンドウの `📚` ボタンから登録UIも開けます
+
+### 辞書登録UIのみ起動
+
+ASRを動かさず、辞書管理だけしたい場合:
+
+```bash
+python main.py --dict
+```
+
+OOV候補リストや既存エントリの編集が可能です。
 
 ### モデルの指定
 
@@ -118,6 +171,10 @@ python main.py --model {モデル名}
   - openaiバックエンド: Whisperモデル名
     - デフォルト: `large-v3-turbo`
     - 利用可能: `tiny`, `base`, `small`, `medium`, `large`, `large-v2`, `large-v3`, `large-v3-turbo`
+  - stable-tsバックエンド: Whisperモデル名（openaiと同じ）
+    - デフォルト: `large-v3-turbo`
+  - hfバックエンド: HuggingFaceモデルID
+    - デフォルト: `openai/whisper-large-v3-turbo`
 
 ### 動的セグメンテーション（低遅延モード）
 
@@ -161,8 +218,11 @@ python main.py
 # 動的VADで低遅延認識
 python main.py --dynamic-vad
 
-# 自動言語判定で翻訳付き
+# 自動言語判定で翻訳付き（Opus-MT、軽量）
 python main.py --language auto --translate
+
+# TranslateGemmaで高品質翻訳（GPU推奨）
+python main.py --language auto --translate --translator gemma
 
 # 動的VAD + 翻訳
 python main.py --dynamic-vad --language auto --translate
@@ -170,14 +230,17 @@ python main.py --dynamic-vad --language auto --translate
 # PyTorch版Whisperを使用して英語音声認識
 python main.py --backend openai --language en
 
+# stable-tsでハルシネーション抑制
+python main.py --backend stable-ts --dynamic-vad
+
+# HFバックエンド + バイアシング（words.json必須）
+python main.py --backend hf --dynamic-vad
+
 # 特定のmlxモデルを使用
 python main.py --backend mlx --model mlx-community/whisper-medium
 
-# PyTorch版Whisperで全機能を使用
-python main.py --backend openai --language auto --translate
-
-# PyTorch版Whisperで特定のモデルを使用
-python main.py --backend openai --model medium
+# 辞書登録UIのみ起動
+python main.py --dict
 ```
 
 <img width="495" height="140" alt="image" src="https://github.com/user-attachments/assets/443a3a83-f6b5-422d-80b5-80d786ffe380" />
@@ -187,7 +250,9 @@ python main.py --backend openai --model medium
 ## PiPウィンドウの操作
 
 - ウィンドウは常に最前面に表示されます
-- `＋`/`－`ボタンでフォントサイズを調整可能（8〜32pt）
+- `＋`/`－`ボタンでフォントサイズを調整可能（8〜96pt）
+- 入力デバイスのプルダウンからマイク等を切り替え可能
+- `📚` ボタンで辞書登録ウィンドウを開く（hfバックエンド時のみ表示）
 - ウィンドウを閉じるとアプリケーションが終了します
 
 ## トラブルシューティング
@@ -214,14 +279,21 @@ sudo apt update && sudo apt install ffmpeg
 
 ### 翻訳が動作しない
 
-- `plamo-translate`がインストールされているか確認してください
-- PLaMoが正しくセットアップされているか確認してください
+- `transformers` と `torch` がインストールされているか確認してください
+- TranslateGemma（`--translator gemma`）はGPU/MPSがないと処理時間が大きくなります。CPU運用なら `opus`（デフォルト）推奨
+- 初回実行時はモデルのダウンロードに時間がかかります
+
+### バイアシングが効かない（hfバックエンド）
+
+- `words.json` がリポジトリ直下に存在し、有効なJSON配列になっているか確認
+- `boost` 値が小さすぎる可能性があります（1.5以上を試してください）
 
 ## 制限事項
 
 - mlxバックエンドはApple Silicon Mac専用です
-- 翻訳機能（PLaMo）はローカルで動作するため、マシンスペックによって処理時間が変わります（M4 Max, 128GBで約4秒のラグ）
+- TranslateGemmaはローカルで動作するため、マシンスペックによって処理時間が変わります（M4 Max, 128GBで数秒のラグ）
 - 通常モードでは3秒ごとに音声を認識するため、リアルタイム性には若干の遅延があります（`--dynamic-vad`で軽減可能）
+- コンテキストバイアシングはhfバックエンドのみで有効です
 
 ---
 
