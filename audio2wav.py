@@ -6,7 +6,7 @@ import time
 
 
 class AudioRecorder:
-    def __init__(self, rate=16000, chunk=1024, channels=1, record_seconds=3):
+    def __init__(self, rate=16000, chunk=1024, channels=1, record_seconds=3, device_index=None):
         self.rate = rate
         self.chunk = chunk
         self.channels = channels
@@ -14,6 +14,7 @@ class AudioRecorder:
         self.format = pyaudio.paFloat32
         self.audio_queue = queue.Queue()
         self.stop_event = threading.Event()
+        self.device_index = device_index
 
     def record_audio(self):
         pa = pyaudio.PyAudio()
@@ -21,10 +22,11 @@ class AudioRecorder:
                     channels=self.channels,
                     format=self.format,
                     input=True,
+                    input_device_index=self.device_index,
                     frames_per_buffer=self.chunk)
 
         while not self.stop_event.is_set():
-            data = stream.read(self.chunk)
+            data = stream.read(self.chunk, exception_on_overflow=False)
             self.audio_queue.put(np.frombuffer(data, dtype=np.float32))
 
         stream.stop_stream()
@@ -38,7 +40,18 @@ class AudioRecorder:
 
     def stop_recording(self):
         self.stop_event.set()
-        self.recording_thread.join()
+        if hasattr(self, "recording_thread"):
+            self.recording_thread.join()
+
+    def change_device(self, device_index):
+        self.stop_recording()
+        self.device_index = device_index
+        while not self.audio_queue.empty():
+            try:
+                self.audio_queue.get_nowait()
+            except queue.Empty:
+                break
+        self.start_recording()
 
     def get_audio_chunk(self):
         required_chunks = int(self.rate / self.chunk * self.record_seconds)
@@ -60,38 +73,37 @@ class DynamicAudioRecorder:
     def __init__(self, rate=16000, chunk=1024, channels=1,
                  silence_threshold=0.01, silence_duration=0.5,
                  min_record_seconds=0.5, max_record_seconds=5.0,
-                 overlap_seconds=0.0):
+                 overlap_seconds=0.0, device_index=None):
         self.rate = rate
         self.chunk = chunk
         self.channels = channels
         self.format = pyaudio.paFloat32
 
-        # VAD パラメータ
-        self.silence_threshold = silence_threshold  # 無音と判定するエネルギー閾値
-        self.silence_duration = silence_duration    # 無音がこの時間続いたら発話終了
-        self.min_record_seconds = min_record_seconds  # 最小録音時間
-        self.max_record_seconds = max_record_seconds  # 最大録音時間
-        self.overlap_seconds = overlap_seconds      # オーバーラップ時間
+        self.silence_threshold = silence_threshold
+        self.silence_duration = silence_duration
+        self.min_record_seconds = min_record_seconds
+        self.max_record_seconds = max_record_seconds
+        self.overlap_seconds = overlap_seconds
 
         self.audio_queue = queue.Queue()
         self.stop_event = threading.Event()
-        self.overlap_buffer = []  # オーバーラップ用バッファ
+        self.overlap_buffer = []
+        self.device_index = device_index
 
     def _calculate_energy(self, audio_chunk):
-        """音声チャンクのエネルギー（RMS）を計算"""
         return np.sqrt(np.mean(audio_chunk ** 2))
 
     def record_audio(self):
-        """バックグラウンドで音声を連続録音"""
         pa = pyaudio.PyAudio()
         stream = pa.open(rate=self.rate,
                         channels=self.channels,
                         format=self.format,
                         input=True,
+                        input_device_index=self.device_index,
                         frames_per_buffer=self.chunk)
 
         while not self.stop_event.is_set():
-            data = stream.read(self.chunk)
+            data = stream.read(self.chunk, exception_on_overflow=False)
             chunk_array = np.frombuffer(data, dtype=np.float32)
             self.audio_queue.put(chunk_array)
 
@@ -106,11 +118,22 @@ class DynamicAudioRecorder:
 
     def stop_recording(self):
         self.stop_event.set()
-        self.recording_thread.join()
+        if hasattr(self, "recording_thread"):
+            self.recording_thread.join()
+
+    def change_device(self, device_index):
+        self.stop_recording()
+        self.device_index = device_index
+        self.overlap_buffer = []
+        while not self.audio_queue.empty():
+            try:
+                self.audio_queue.get_nowait()
+            except queue.Empty:
+                break
+        self.start_recording()
 
     def get_audio_chunk(self):
-        """VADベースで動的に音声チャンクを取得"""
-        audio_data = list(self.overlap_buffer)  # 前回のオーバーラップを先頭に
+        audio_data = list(self.overlap_buffer)
         self.overlap_buffer = []
 
         chunk_duration = self.chunk / self.rate
@@ -130,14 +153,11 @@ class DynamicAudioRecorder:
                 energy = self._calculate_energy(chunk)
 
                 if energy > self.silence_threshold:
-                    # 発話検出
                     is_speaking = True
                     consecutive_silence = 0
                 else:
-                    # 無音
                     consecutive_silence += 1
 
-                # 発話開始後、無音が一定時間続いたら終了
                 if is_speaking and consecutive_silence >= silence_chunks_needed:
                     if len(audio_data) >= min_chunks:
                         break
@@ -149,7 +169,6 @@ class DynamicAudioRecorder:
         if not audio_data:
             return None
 
-        # オーバーラップ用に末尾を保存
         if overlap_chunks > 0 and len(audio_data) > overlap_chunks:
             self.overlap_buffer = audio_data[-overlap_chunks:]
 
@@ -157,30 +176,54 @@ class DynamicAudioRecorder:
 
 
 recorder = None
-recorder_mode = "fixed"  # "fixed" or "dynamic"
+recorder_mode = "fixed"
 
 
-def initialize_recorder(mode="fixed", **kwargs):
-    """
-    レコーダーを初期化
+def list_input_devices():
+    """利用可能な入力デバイス一覧を返す"""
+    pa = pyaudio.PyAudio()
+    devices = []
+    try:
+        try:
+            default_index = pa.get_default_input_device_info().get("index")
+        except Exception:
+            default_index = None
+        for i in range(pa.get_device_count()):
+            info = pa.get_device_info_by_index(i)
+            if info.get("maxInputChannels", 0) > 0:
+                devices.append({
+                    "index": i,
+                    "name": info.get("name", f"device {i}"),
+                    "is_default": i == default_index,
+                })
+    finally:
+        pa.terminate()
+    return devices
 
-    Args:
-        mode: "fixed" (固定3秒) or "dynamic" (VADベース動的セグメンテーション)
-        **kwargs: DynamicAudioRecorderのパラメータ
-            - silence_threshold: 無音判定閾値 (default: 0.01)
-            - silence_duration: 無音継続時間 (default: 0.5秒)
-            - min_record_seconds: 最小録音時間 (default: 0.5秒)
-            - max_record_seconds: 最大録音時間 (default: 5.0秒)
-            - overlap_seconds: オーバーラップ時間 (default: 0.0秒)
-    """
+
+def get_current_device():
+    if recorder is None:
+        return None
+    return getattr(recorder, "device_index", None)
+
+
+def switch_device(device_index):
+    """実行中のレコーダーの入力デバイスを切り替える"""
+    global recorder
+    if recorder is None:
+        return
+    recorder.change_device(device_index)
+
+
+def initialize_recorder(mode="fixed", device_index=None, **kwargs):
     global recorder, recorder_mode
     recorder_mode = mode
 
     if recorder is None:
         if mode == "dynamic":
-            recorder = DynamicAudioRecorder(**kwargs)
+            recorder = DynamicAudioRecorder(device_index=device_index, **kwargs)
         else:
-            recorder = AudioRecorder()
+            recorder = AudioRecorder(device_index=device_index)
         recorder.start_recording()
 
 

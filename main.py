@@ -5,39 +5,17 @@ import threading
 import queue
 import tkinter as tk
 import argparse
-import subprocess
 import sys
 import os
 
-def translate_with_plamo(text, from_lang, to_lang):
-    try:
-        result = subprocess.run(
-            [
-                "plamo-translate",
-                "--from", from_lang,
-                "--to", to_lang,
-                "--input", text
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=60
-        )
-        if result.returncode != 0:
-            err = result.stderr.decode().strip()
-            print(f"[PLaMo翻訳エラー]\n{err}", file=sys.stderr)
-            return f"[翻訳エラー]"
-        return result.stdout.decode().strip()
-    except Exception as e:
-        print(f"[PLaMo呼び出し例外]\n{e}", file=sys.stderr)
-        return f"[翻訳エラー: {e}]"
+from asr.translator_gemma import GemmaTranslator
+from asr.translator_opus import OpusTranslator
 
 def detect_translation_direction(lang):
-    # Whisper認識言語から翻訳方向を決定
-    # plamo-translate仕様に合わせて英語表記へ変更
     if lang == "ja":
-        return ("Japanese", "English")
+        return ("ja", "en")
     elif lang == "en":
-        return ("English", "Japanese")
+        return ("en", "ja")
     else:
         return (None, None)
 
@@ -46,18 +24,35 @@ def record_audio_thread(audio_q):
     try:
         while True:
             frame = audio2wav.record_audio()
+            if frame is None:
+                continue
             audio_q.put(frame)
     except Exception as e:
         print(f"[録音エラー]\n{e}", file=sys.stderr)
 
+TRANSLATE_QUEUE_MAX = 2  # バックプレッシャー: 溢れたら古いジョブを破棄して最新優先
+
+def translate_worker_thread(translate_q, result_q, translator):
+    while True:
+        item = translate_q.get()
+        if item is None:
+            translate_q.task_done()
+            break
+        uid, text, src, tgt = item
+        t0 = time.time()
+        translated = translator.translate(text, src, tgt)
+        translate_q.task_done()
+        print(f"[timing] translate uid={uid} dt={time.time()-t0:.2f}s tqlen={translate_q.qsize()}")
+        result_q.put(("translation", uid, translated))
+
+
 # mainブランチ準拠: transcribe_audio_thread構造を統一、backend対応のみ追加
-def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, backend, model_name):
+def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, backend, model_name, oov_queue=None, translate_q=None):
     """
     音声認識スレッド。バックエンドに応じて処理を切り替える。
-    backend: 'mlx', 'openai', または 'stable-ts'
-    model_name: 使用するモデル名(mlx: HFリポジトリパス、openai/stable-ts: Whisperモデル名)
+    backend: 'mlx', 'openai', 'stable-ts', または 'hf'
+    model_name: 使用するモデル名
     """
-    # mainブランチ準拠: backend選択のみ差分
     if backend == "mlx":
         print(f"[MLX] モデル: {model_name}")
     elif backend == "openai":
@@ -70,16 +65,28 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
         print(f"[Stable-TS] モデルをロード中: {model_name}")
         asr_model = stable_whisper.load_model(model_name)
         print("[Stable-TS] モデルのロードが完了しました")
+    elif backend == "hf":
+        from asr.biased_whisper import BiasingWhisperBackend
+        asr_model = BiasingWhisperBackend(
+            model_name=model_name,
+            language=lang_mode,
+            registry_path="words.json",
+        )
     else:
         raise ValueError(f"未対応のバックエンド: {backend}")
-    
+
+    utterance_id = 0
+
     while True:
         try:
             frame = audio_q.get()
             if frame is None:
                 audio_q.task_done()
                 break
-            
+
+            audio_sec = len(frame) / 16000.0 if hasattr(frame, "__len__") else 0.0
+            t_asr_start = time.time()
+
             # mainブランチ準拠: backend分岐のみ差分
             if backend == "mlx":
                 if lang_mode == "auto":
@@ -107,23 +114,39 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
                     "text": stable_result.text if hasattr(stable_result, 'text') else str(stable_result),
                     "language": stable_result.language if hasattr(stable_result, 'language') else lang_mode,
                 }
+            elif backend == "hf":
+                result = asr_model.transcribe(frame)
+                # OOV候補をoov_queueに送信
+                if hasattr(asr_model, 'oov_candidates') and asr_model.oov_candidates:
+                    if oov_queue is not None:
+                        oov_queue.put(list(asr_model.oov_candidates))
             
             text = result.get("text", "").strip()
             detected_lang = result.get("language", lang_mode)
             audio_q.task_done()
-            
+            asr_sec = time.time() - t_asr_start
+
             if not text:
                 continue
-            
-            # mainブランチ準拠: 翻訳処理
-            translated = None
-            if enable_translate:
+
+            utterance_id += 1
+            print(f"[timing] uid={utterance_id} audio={audio_sec:.2f}s asr={asr_sec:.2f}s aqlen={audio_q.qsize()}")
+
+            # 認識テキストを即時UI表示
+            result_q.put(("text", utterance_id, text))
+
+            # 翻訳ジョブを別キューへ投入(バックプレッシャー: 上限超過時は古いジョブを破棄)
+            if enable_translate and translate_q is not None:
                 from_lang, to_lang = detect_translation_direction(detected_lang)
                 if from_lang and to_lang:
-                    translated = translate_with_plamo(text, from_lang, to_lang)
-            
-            # mainブランチ準拠: 結果はタプル形式で送信
-            result_q.put((text, translated))
+                    while translate_q.qsize() >= TRANSLATE_QUEUE_MAX:
+                        try:
+                            dropped = translate_q.get_nowait()
+                            translate_q.task_done()
+                            print(f"[backpressure] 翻訳ジョブ破棄 uid={dropped[0]}")
+                        except queue.Empty:
+                            break
+                    translate_q.put((utterance_id, text, from_lang, to_lang))
             
         except Exception as e:
             print(f"[文字起こしエラー]\n{e}", file=sys.stderr)
@@ -131,55 +154,126 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
             traceback.print_exc()
             audio_q.task_done()
 
-# mainブランチ準拠: start_pip_window構造そのままコピー
-def start_pip_window(result_q, stop_ev):
+FONT_MIN = 8
+FONT_MAX = 96
+FONT_DEFAULT = 14
+
+
+def start_pip_window(result_q, stop_ev, backend=None, registry=None, reload_cb=None, oov_queue=None, translate_enabled=False):
     pip = tk.Toplevel()
     pip.title("asrivia")
-    pip.geometry("500x110")
+    pip.geometry("600x180")
+    pip.minsize(360, 120)
     pip.attributes("-topmost", True)
     pip.attributes("-alpha", 1.0)
-    
-    font_size = tk.IntVar(value=14)
-    text_label = tk.Label(pip, text="認識結果がここに表示されます", font=("Arial", 14), wraplength=480, justify="left")
-    text_label.pack(pady=10)
-    # mainブランチ準拠: 翻訳結果も同じラベルで表示、文字色を白に変更
-    translate_label = tk.Label(pip, text="", font=("Arial", 12), fg="white", wraplength=480, justify="left")
-    translate_label.pack(pady=5)
-    
+
+    font_size = tk.IntVar(value=FONT_DEFAULT)
+
+    # ボタンバーを最初にpack(side=BOTTOM)して最下部を確保
+    button_frame = tk.Frame(pip)
+    button_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=4)
+
+    text_label = tk.Label(
+        pip,
+        text="認識結果がここに表示されます",
+        font=("Arial", FONT_DEFAULT),
+        wraplength=580,
+        justify="left",
+        anchor="nw",
+    )
+    text_label.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=8)
+
+    def update_wraplength(event=None):
+        try:
+            w = pip.winfo_width()
+        except tk.TclError:
+            return
+        if w > 40:
+            text_label.config(wraplength=w - 40)
+
+    pip.bind("<Configure>", update_wraplength)
+
     def change_font(delta):
-        new_size = font_size.get() + delta
-        if new_size < 8:
-            new_size = 8
-        elif new_size > 32:
-            new_size = 32
+        new_size = max(FONT_MIN, min(FONT_MAX, font_size.get() + delta))
         font_size.set(new_size)
         text_label.config(font=("Arial", new_size))
-        translate_label.config(font=("Arial", max(8, new_size - 2)))
-    
-    button_frame = tk.Frame(pip)
-    button_frame.pack(side=tk.BOTTOM, pady=5)
-    btn_decrease = tk.Button(button_frame, text="－", command=lambda: change_font(-2))
-    btn_decrease.pack(side=tk.LEFT, padx=5)
-    btn_increase = tk.Button(button_frame, text="＋", command=lambda: change_font(2))
-    btn_increase.pack(side=tk.LEFT, padx=5)
-    
-    # mainブランチ準拠: poll_queue構造そのままコピー
+
+    btn_decrease = tk.Button(button_frame, text="－", width=2, command=lambda: change_font(-2))
+    btn_decrease.pack(side=tk.LEFT, padx=2)
+    btn_increase = tk.Button(button_frame, text="＋", width=2, command=lambda: change_font(2))
+    btn_increase.pack(side=tk.LEFT, padx=2)
+
+    # 入力デバイス選択
+    devices = audio2wav.list_input_devices()
+    current_idx = audio2wav.get_current_device()
+
+    def device_label(d):
+        suffix = " (default)" if d.get("is_default") else ""
+        return f"{d['index']}: {d['name']}{suffix}"
+
+    if devices:
+        labels = [device_label(d) for d in devices]
+        label_to_index = {device_label(d): d["index"] for d in devices}
+        initial_label = next(
+            (lbl for lbl, idx in label_to_index.items() if idx == current_idx),
+            labels[0],
+        )
+        device_var = tk.StringVar(value=initial_label)
+
+        def on_device_change(selection):
+            idx = label_to_index.get(selection)
+            if idx is None:
+                return
+            try:
+                audio2wav.switch_device(idx)
+                print(f"[audio] デバイス切替 → {selection}")
+            except Exception as e:
+                print(f"[audio] デバイス切替失敗: {e}", file=sys.stderr)
+
+        device_menu = tk.OptionMenu(button_frame, device_var, *labels, command=on_device_change)
+        device_menu.config(width=18)
+        device_menu.pack(side=tk.LEFT, padx=4)
+
+    # 辞書ボタン（hfバックエンド時のみ表示）
+    if backend == "hf" and registry is not None:
+        from asr.dict_window import DictWindow
+        def open_dict_window():
+            DictWindow(pip, registry, reload_cb, oov_queue)
+        btn_dict = tk.Button(button_frame, text="📚", command=open_dict_window)
+        btn_dict.pack(side=tk.LEFT, padx=4)
+
+    # 現在表示中の発話状態
+    state = {"uid": None, "text": "", "translated": None, "translate_enabled": translate_enabled}
+
+    def render():
+        if state["text"] == "":
+            return
+        if state["translate_enabled"]:
+            tr = state["translated"] if state["translated"] is not None else "..."
+            text_label.config(text=f"{state['text']}\n→ {tr}")
+        else:
+            text_label.config(text=state["text"])
+
     def poll_queue():
         try:
             while True:
-                text, translated = result_q.get_nowait()
-                # mainブランチ準拠: 認識結果と翻訳結果を「→」形式で表示
-                if translated:
-                    text_label.config(text=f"{text}\n→ {translated}")
-                else:
-                    text_label.config(text=text)
-                # translate_labelは使用しないので空にする
-                translate_label.config(text="")
+                msg = result_q.get_nowait()
+                kind, uid, payload = msg
+                if kind == "text":
+                    state["uid"] = uid
+                    state["text"] = payload
+                    state["translated"] = None
+                    render()
+                elif kind == "translation":
+                    if uid == state["uid"]:
+                        state["translated"] = payload
+                        render()
+                    # 古い翻訳が遅れて到着した場合は破棄
                 result_q.task_done()
         except queue.Empty:
             pass
         if not stop_ev.is_set():
-            pip.after(250, poll_queue)
+            pip.after(100, poll_queue)
         else:
             pip.destroy()
     
@@ -192,8 +286,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--language", choices=["ja", "en", "auto"], default="ja", help="認識言語モード: ja=日本語 en=英語 auto=自動判定")
     parser.add_argument("--translate", action="store_true", help="翻訳も実行する(指定しないと翻訳なし)")
+    parser.add_argument("--translator", choices=["opus", "gemma"], default="opus", help="翻訳器: opus=軽量CPU(デフォルト, 高速) gemma=TranslateGemma 4B(高品質, GPU)")
     # mainブランチ準拠: backend/model引数のみ差分
-    parser.add_argument("--backend", choices=["mlx", "openai", "stable-ts"], default="mlx", help="ASRバックエンド: mlx=ローカル(デフォルト) openai=ローカルPyTorch版Whisper stable-ts=Whisper+VAD")
+    parser.add_argument("--backend", choices=["mlx", "openai", "stable-ts", "hf"], default="mlx", help="ASRバックエンド: mlx=ローカル(デフォルト) openai=ローカルPyTorch版Whisper stable-ts=Whisper+VAD hf=HuggingFace Whisper+biasing")
+    parser.add_argument("--dict", action="store_true", dest="dict_only", help="辞書登録UIのみ起動（ASRなし）")
     parser.add_argument("--model", type=str, default=None, help="使用するモデル名(mlx: HFリポジトリパス、openai: Whisperモデル名)")
     # 動的セグメンテーション関連オプション
     parser.add_argument("--dynamic-vad", action="store_true", help="VADベースの動的セグメンテーションを有効化")
@@ -204,7 +300,7 @@ def main():
     parser.add_argument("--overlap", type=float, default=0.0, help="オーバーラップ時間[秒] (default: 0.0)")
     args = parser.parse_args()
     
-    # mainブランチ準拠: デフォルトモデル設定のみ差分
+    # デフォルトモデル設定
     if args.model is None:
         if args.backend == "mlx":
             args.model = "mlx-community/whisper-large-v3-turbo"
@@ -212,6 +308,8 @@ def main():
             args.model = "large-v3-turbo"
         elif args.backend == "stable-ts":
             args.model = "large-v3-turbo"
+        elif args.backend == "hf":
+            args.model = "openai/whisper-large-v3-turbo"
     
     print(f"ASRバックエンド: {args.backend}")
     print(f"使用モデル: {args.model}")
@@ -219,9 +317,23 @@ def main():
     root = tk.Tk()
     root.withdraw()
 
+    # --dict モード: 辞書UIのみ起動
+    if args.dict_only:
+        from asr.biasing import WordRegistry
+        from asr.dict_window import DictWindow
+        registry = WordRegistry.load("words.json")
+        DictWindow(root, registry)
+        root.mainloop()
+        return
+
     audio_q = queue.Queue()
     result_q = queue.Queue()
     stop_ev = threading.Event()
+    oov_queue = queue.Queue() if args.backend == "hf" else None
+
+    # hfバックエンド用: registryとreload_cbを事前準備
+    hf_registry = None
+    hf_reload_cb = None
 
     # レコーダー初期化
     if args.dynamic_vad:
@@ -236,17 +348,38 @@ def main():
         )
     else:
         audio2wav.initialize_recorder(mode="fixed")
-    
-    # mainブランチ準拠: スレッド起動構造そのままコピー
+
+    # hfバックエンド: UIからregistryを共有するためにここでロード
+    if args.backend == "hf":
+        from asr.biasing import WordRegistry
+        hf_registry = WordRegistry.load("words.json")
+        # reload_cbはtranscribeスレッド内のbackendに委譲（mtime監視で自動リロード）
+        hf_reload_cb = None  # backend側でmtime監視するため不要
+
+    translator = None
+    if args.translate:
+        if args.translator == "gemma":
+            translator = GemmaTranslator()
+        else:
+            translator = OpusTranslator()
+    translate_q = queue.Queue() if args.translate else None
+
     threading.Thread(target=record_audio_thread, args=(audio_q,), daemon=True).start()
-    
+
     threading.Thread(
         target=transcribe_audio_thread,
-        args=(audio_q, result_q, args.language, args.translate, args.backend, args.model),
+        args=(audio_q, result_q, args.language, args.translate, args.backend, args.model, oov_queue, translate_q),
         daemon=True
     ).start()
-    
-    start_pip_window(result_q, stop_ev)
+
+    if args.translate:
+        threading.Thread(
+            target=translate_worker_thread,
+            args=(translate_q, result_q, translator),
+            daemon=True
+        ).start()
+
+    start_pip_window(result_q, stop_ev, args.backend, hf_registry, hf_reload_cb, oov_queue, translate_enabled=args.translate)
 
 if __name__ == "__main__":
     main()
