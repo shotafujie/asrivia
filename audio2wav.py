@@ -5,6 +5,23 @@ import queue
 import time
 
 
+# PortAudio の Pa_Initialize/Pa_Terminate(pyaudio.PyAudio()/.terminate())は
+# スレッドアンセーフなグローバル状態を触るため、複数スレッドから同時に呼ぶと
+# macOS で segfault する。プロセス全体で単一インスタンスを共有し、生成と終了を
+# それぞれ一度きりに限定することで競合を無くす。
+_pa_instance = None
+_pa_lock = threading.Lock()
+
+
+def get_pyaudio():
+    """プロセス共有の単一 PyAudio インスタンスを返す(無ければ生成)。"""
+    global _pa_instance
+    with _pa_lock:
+        if _pa_instance is None:
+            _pa_instance = pyaudio.PyAudio()
+        return _pa_instance
+
+
 class AudioRecorder:
     def __init__(self, rate=16000, chunk=1024, channels=1, record_seconds=3, device_index=None):
         self.rate = rate
@@ -17,21 +34,23 @@ class AudioRecorder:
         self.device_index = device_index
 
     def record_audio(self):
-        pa = pyaudio.PyAudio()
-        stream = pa.open(rate=self.rate,
-                    channels=self.channels,
-                    format=self.format,
-                    input=True,
-                    input_device_index=self.device_index,
-                    frames_per_buffer=self.chunk)
+        pa = get_pyaudio()
+        with _pa_lock:
+            stream = pa.open(rate=self.rate,
+                        channels=self.channels,
+                        format=self.format,
+                        input=True,
+                        input_device_index=self.device_index,
+                        frames_per_buffer=self.chunk)
 
-        while not self.stop_event.is_set():
-            data = stream.read(self.chunk, exception_on_overflow=False)
-            self.audio_queue.put(np.frombuffer(data, dtype=np.float32))
-
-        stream.stop_stream()
-        stream.close()
-        pa.terminate()
+        try:
+            while not self.stop_event.is_set():
+                data = stream.read(self.chunk, exception_on_overflow=False)
+                self.audio_queue.put(np.frombuffer(data, dtype=np.float32))
+        finally:
+            stream.stop_stream()
+            stream.close()
+            # 共有インスタンスのため terminate() しない(cleanup() で一度だけ)。
 
     def start_recording(self):
         self.stop_event.clear()
@@ -94,22 +113,24 @@ class DynamicAudioRecorder:
         return np.sqrt(np.mean(audio_chunk ** 2))
 
     def record_audio(self):
-        pa = pyaudio.PyAudio()
-        stream = pa.open(rate=self.rate,
-                        channels=self.channels,
-                        format=self.format,
-                        input=True,
-                        input_device_index=self.device_index,
-                        frames_per_buffer=self.chunk)
+        pa = get_pyaudio()
+        with _pa_lock:
+            stream = pa.open(rate=self.rate,
+                            channels=self.channels,
+                            format=self.format,
+                            input=True,
+                            input_device_index=self.device_index,
+                            frames_per_buffer=self.chunk)
 
-        while not self.stop_event.is_set():
-            data = stream.read(self.chunk, exception_on_overflow=False)
-            chunk_array = np.frombuffer(data, dtype=np.float32)
-            self.audio_queue.put(chunk_array)
-
-        stream.stop_stream()
-        stream.close()
-        pa.terminate()
+        try:
+            while not self.stop_event.is_set():
+                data = stream.read(self.chunk, exception_on_overflow=False)
+                chunk_array = np.frombuffer(data, dtype=np.float32)
+                self.audio_queue.put(chunk_array)
+        finally:
+            stream.stop_stream()
+            stream.close()
+            # 共有インスタンスのため terminate() しない(cleanup() で一度だけ)。
 
     def start_recording(self):
         self.stop_event.clear()
@@ -181,9 +202,10 @@ recorder_mode = "fixed"
 
 def list_input_devices():
     """利用可能な入力デバイス一覧を返す"""
-    pa = pyaudio.PyAudio()
+    pa = get_pyaudio()
     devices = []
-    try:
+    # 列挙は録音スレッドの pa.open() と同じロックで直列化する。
+    with _pa_lock:
         try:
             default_index = pa.get_default_input_device_info().get("index")
         except Exception:
@@ -196,8 +218,6 @@ def list_input_devices():
                     "name": info.get("name", f"device {i}"),
                     "is_default": i == default_index,
                 })
-    finally:
-        pa.terminate()
     return devices
 
 
@@ -235,7 +255,11 @@ def record_audio():
 
 
 def cleanup():
-    global recorder
+    global recorder, _pa_instance
     if recorder is not None:
         recorder.stop_recording()
         recorder = None
+    with _pa_lock:
+        if _pa_instance is not None:
+            _pa_instance.terminate()
+            _pa_instance = None
