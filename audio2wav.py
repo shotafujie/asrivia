@@ -190,6 +190,12 @@ class DynamicAudioRecorder:
         if not audio_data:
             return None
 
+        # 発話が一度も検出されなければ(全区間が無音)、ASR に渡さず破棄する。
+        # 無音を渡すと特に Whisper が「ご視聴ありがとうございました」等を幻聴するため。
+        # producer(record_audio_thread)は None をスキップする。
+        if not is_speaking:
+            return None
+
         if overlap_chunks > 0 and len(audio_data) > overlap_chunks:
             self.overlap_buffer = audio_data[-overlap_chunks:]
 
