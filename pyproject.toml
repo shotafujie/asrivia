@@ -12,6 +12,14 @@ dependencies = [
     "openai-whisper>=20231117",
     "transformers>=4.40",
     "mlx-lm>=0.29.1",
+    # opt-in バックエンド(--backend qwen)用の Qwen3-ASR MLX 実装。
+    # MLX(>=0.31)/Python>=3.10 を要するため 3.10+ 限定。torch/transformers 非依存。
+    "mlx-qwen3-asr; python_version >= '3.10'",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=7",
 ]
 
 [tool.uv.workspace]
