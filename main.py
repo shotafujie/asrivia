@@ -72,6 +72,12 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
             language=lang_mode,
             registry_path="words.json",
         )
+    elif backend == "qwen":
+        from asr.qwen_asr_backend import QwenASRBackend
+        asr_model = QwenASRBackend(
+            model_name=model_name,
+            language=lang_mode,
+        )
     else:
         raise ValueError(f"未対応のバックエンド: {backend}")
 
@@ -120,7 +126,9 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
                 if hasattr(asr_model, 'oov_candidates') and asr_model.oov_candidates:
                     if oov_queue is not None:
                         oov_queue.put(list(asr_model.oov_candidates))
-            
+            elif backend == "qwen":
+                result = asr_model.transcribe(frame)
+
             text = result.get("text", "").strip()
             detected_lang = result.get("language", lang_mode)
             audio_q.task_done()
@@ -288,7 +296,7 @@ def main():
     parser.add_argument("--translate", action="store_true", help="翻訳も実行する(指定しないと翻訳なし)")
     parser.add_argument("--translator", choices=["opus", "gemma"], default="opus", help="翻訳器: opus=軽量CPU(デフォルト, 高速) gemma=TranslateGemma 4B(高品質, GPU)")
     # mainブランチ準拠: backend/model引数のみ差分
-    parser.add_argument("--backend", choices=["mlx", "openai", "stable-ts", "hf"], default="mlx", help="ASRバックエンド: mlx=ローカル(デフォルト) openai=ローカルPyTorch版Whisper stable-ts=Whisper+VAD hf=HuggingFace Whisper+biasing")
+    parser.add_argument("--backend", choices=["mlx", "openai", "stable-ts", "hf", "qwen"], default="mlx", help="ASRバックエンド: mlx=ローカル(デフォルト) openai=ローカルPyTorch版Whisper stable-ts=Whisper+VAD hf=HuggingFace Whisper+biasing qwen=Qwen3-ASR 0.6B MLX(高精度・biasing非対応)")
     parser.add_argument("--dict", action="store_true", dest="dict_only", help="辞書登録UIのみ起動（ASRなし）")
     parser.add_argument("--model", type=str, default=None, help="使用するモデル名(mlx: HFリポジトリパス、openai: Whisperモデル名)")
     # 動的セグメンテーション関連オプション
@@ -310,7 +318,9 @@ def main():
             args.model = "large-v3-turbo"
         elif args.backend == "hf":
             args.model = "openai/whisper-large-v3-turbo"
-    
+        elif args.backend == "qwen":
+            args.model = "Qwen/Qwen3-ASR-0.6B"
+
     print(f"ASRバックエンド: {args.backend}")
     print(f"使用モデル: {args.model}")
 
