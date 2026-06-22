@@ -8,7 +8,7 @@
 - **PiPウィンドウ表示**: 常に最前面に表示され、他のアプリケーションの上に重ねて使用可能
 - **日英翻訳**: Opus-MT（軽量・高速）またはTranslateGemma（高品質）を選択可能
 - **非同期翻訳パイプライン**: 認識を待たせず翻訳を別スレッドで実行（バックプレッシャー制御つき）
-- **複数ASRバックエンド対応**: MLX / PyTorch（openai） / stable-ts（VAD付き） / HuggingFace（バイアシング対応）
+- **複数ASRバックエンド対応**: MLX / PyTorch（openai） / stable-ts（VAD付き） / HuggingFace（バイアシング対応） / Qwen3-ASR（MLX・高精度）
 - **コンテキストバイアシング**: 専門用語や固有名詞をブースト（HFバックエンドのみ、`words.json`で管理）
 - **入力デバイス選択**: PiPウィンドウからマイク等の入力デバイスを切り替え可能
 - **辞書登録UI**: 認識結果のOOV（未知語）候補からワンクリックで辞書追加
@@ -25,6 +25,7 @@
 | PyTorch（openai） | macOS / Linux / Windows | 16GB以上 |
 | stable-ts | macOS / Linux / Windows | 16GB以上 |
 | HuggingFace（hf） | macOS / Linux / Windows（GPUあれば高速） | 16GB以上 |
+| Qwen3-ASR（qwen） | macOS（Apple Silicon） | 16GB以上 |
 
 ### ソフトウェア要件
 
@@ -84,6 +85,14 @@ pip install transformers torch pyaudio
 
 初回実行時に、Whisperモデルが自動的にダウンロードされます。
 
+#### qwenバックエンド用（Qwen3-ASR / MLX）
+
+```bash
+pip install mlx-qwen3-asr pyaudio
+```
+
+Apple Silicon専用（MLX）。torch/transformersは不要です。初回実行時に `Qwen/Qwen3-ASR-0.6B` が自動ダウンロードされます。`uv sync` を使う場合は不要です（`pyproject.toml` に含まれています）。
+
 ### 翻訳機能を使用する場合
 
 翻訳器は2種類から選べます。デフォルトは軽量CPU向けの **Opus-MT**、高品質を求めるなら **TranslateGemma**（GPU推奨）。
@@ -124,7 +133,7 @@ python main.py --language {ja|en|auto} --translate [--translator {opus|gemma}]
 ### ASRバックエンドの選択
 
 ```bash
-python main.py --backend {mlx|openai|stable-ts|hf}
+python main.py --backend {mlx|openai|stable-ts|hf|qwen}
 ```
 
 - `--backend`: ASRバックエンドを指定
@@ -132,6 +141,7 @@ python main.py --backend {mlx|openai|stable-ts|hf}
   - `openai`: PyTorch版Whisperを使用（クロスプラットフォーム）
   - `stable-ts`: Whisper + Silero VAD（ハルシネーション抑制）
   - `hf`: HuggingFace Whisper + コンテキストバイアシング（専門用語をブースト）
+  - `qwen`: Qwen3-ASR 0.6B（MLX実装）。日本語精度が高く、Python/GitHub等の英字をカタカナ化せず出力できる。Apple Silicon専用、biasing非対応
 
 ### コンテキストバイアシング（hfバックエンド）
 
@@ -175,6 +185,9 @@ python main.py --model {モデル名}
     - デフォルト: `large-v3-turbo`
   - hfバックエンド: HuggingFaceモデルID
     - デフォルト: `openai/whisper-large-v3-turbo`
+  - qwenバックエンド: Qwen3-ASR モデルID
+    - デフォルト: `Qwen/Qwen3-ASR-0.6B`
+    - 例: `Qwen/Qwen3-ASR-1.7B`（より高精度・要メモリ）
 
 ### 動的セグメンテーション（低遅延モード）
 
@@ -235,6 +248,9 @@ python main.py --backend stable-ts --dynamic-vad
 
 # HFバックエンド + バイアシング（words.json必須）
 python main.py --backend hf --dynamic-vad
+
+# Qwen3-ASR（MLX）で高精度認識（Apple Silicon専用）
+python main.py --backend qwen --dynamic-vad
 
 # 特定のmlxモデルを使用
 python main.py --backend mlx --model mlx-community/whisper-medium
