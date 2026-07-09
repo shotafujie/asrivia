@@ -1,4 +1,5 @@
 import mlx_whisper
+import re
 import time
 import audio2wav
 import koepus_writer
@@ -25,12 +26,92 @@ def detect_translation_direction(lang):
 def record_audio_thread(audio_q):
     try:
         while True:
-            frame = audio2wav.record_audio()
-            if frame is None:
+            item = audio2wav.record_audio()  # (uid, frame) または None(無音破棄)
+            if item is None:
                 continue
-            audio_q.put(frame)
+            audio_q.put(item)
     except Exception as e:
         print(f"[録音エラー]\n{e}", file=sys.stderr)
+
+
+LIVE_MIN_BUFFER_SEC = 0.5  # これ未満の部分バッファは認識しない(短すぎて幻聴しやすい)
+
+# Whisper が無音・ノイズ区間で出す定型幻聴フレーズ。
+# VAD の全区間無音破棄をすり抜けた短ノイズや、ライブ仮字幕の部分バッファで出る。
+HALLUCINATION_BLACKLIST = [
+    "ご視聴ありがとうございました",
+    "ご清聴ありがとうございました",
+    "チャンネル登録をお願いします",
+    "チャンネル登録",
+    "最後までご視聴いただきありがとうございます",
+    "おやすみなさい",
+    "thank you for watching",
+    "thanks for watching",
+    "please subscribe",
+]
+# ブラックリスト句がテキストの大半を占めるときだけ幻聴とみなす(実発話の巻き込み防止)
+HALLUCINATION_DOMINANCE_RATIO = 0.6
+# Whisper 自身の無音判定: 全セグメントがこの両閾値を超えたら無音由来とみなす
+NO_SPEECH_PROB_THRESHOLD = 0.6
+AVG_LOGPROB_THRESHOLD = -1.0
+
+
+def _normalize_for_blacklist(text):
+    return re.sub(r"[\s。、．，,.!！?？~〜…・「」()（）]", "", text).lower()
+
+
+def is_probable_hallucination(text, result):
+    """無音・ノイズ由来の幻聴テキストなら True。
+
+    1) 定型幻聴フレーズがテキストの大半を占める
+    2) Whisper の全セグメントが no_speech_prob 高 かつ avg_logprob 低
+    のいずれかで幻聴と判定する。
+    """
+    norm = _normalize_for_blacklist(text)
+    if not norm:
+        return True
+    for phrase in HALLUCINATION_BLACKLIST:
+        p = _normalize_for_blacklist(phrase)
+        if p in norm and len(p) / len(norm) >= HALLUCINATION_DOMINANCE_RATIO:
+            return True
+    segments = result.get("segments") or []
+    if segments and all(
+        seg.get("no_speech_prob", 0.0) > NO_SPEECH_PROB_THRESHOLD
+        and seg.get("avg_logprob", 0.0) < AVG_LOGPROB_THRESHOLD
+        for seg in segments
+    ):
+        return True
+    return False
+
+
+def live_caption_thread(result_q, first_model, lang_mode, interval, final_busy):
+    """first pass: 録音中のバッファを小型モデルで逐次認識し仮字幕を出す。
+
+    確定パス(second pass)の実行中はティックをスキップして GPU を譲り、
+    確定字幕のレイテンシに影響を与えない。
+    """
+    print(f"[ライブ字幕] first passモデル: {first_model} (間隔: {interval}s)")
+    while True:
+        time.sleep(interval)
+        if final_busy.is_set():
+            continue
+        partial = audio2wav.get_partial_buffer()
+        if partial is None:
+            continue
+        uid, buf = partial
+        if len(buf) < 16000 * LIVE_MIN_BUFFER_SEC:
+            continue
+        try:
+            if lang_mode == "auto":
+                result = mlx_whisper.transcribe(buf, path_or_hf_repo=first_model)
+            else:
+                result = mlx_whisper.transcribe(buf, path_or_hf_repo=first_model, language=lang_mode)
+        except Exception as e:
+            print(f"[ライブ字幕エラー]\n{e}", file=sys.stderr)
+            continue
+        text = result.get("text", "").strip()
+        if text and not is_probable_hallucination(text, result):
+            result_q.put(("partial", uid, text))
 
 TRANSLATE_QUEUE_MAX = 2  # バックプレッシャー: 溢れたら古いジョブを破棄して最新優先
 
@@ -49,12 +130,13 @@ def translate_worker_thread(translate_q, result_q, translator):
 
 
 # mainブランチ準拠: transcribe_audio_thread構造を統一、backend対応のみ追加
-def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, backend, model_name, oov_queue=None, translate_q=None, koepus_cfg=None):
+def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, backend, model_name, oov_queue=None, translate_q=None, koepus_cfg=None, final_busy=None):
     """
     音声認識スレッド。バックエンドに応じて処理を切り替える。
     backend: 'mlx', 'openai', 'stable-ts', または 'hf'
     model_name: 使用するモデル名
     koepus_cfg: koepus書き出し設定 dict({"dir", "backend", "model", "dynamic_vad"})。None なら無効
+    final_busy: 確定ASR実行中を示すEvent。ライブ字幕スレッドがGPU競合回避に使う
     """
     if backend == "mlx":
         print(f"[MLX] モデル: {model_name}")
@@ -84,17 +166,19 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
     else:
         raise ValueError(f"未対応のバックエンド: {backend}")
 
-    utterance_id = 0
-
     while True:
         try:
-            frame = audio_q.get()
-            if frame is None:
+            item = audio_q.get()
+            if item is None:
                 audio_q.task_done()
                 break
+            utterance_id, frame = item  # uid は録音側(レコーダー)で採番済み
 
             audio_sec = len(frame) / 16000.0 if hasattr(frame, "__len__") else 0.0
             t_asr_start = time.time()
+
+            if final_busy is not None:
+                final_busy.set()
 
             # mainブランチ準拠: backend分岐のみ差分
             if backend == "mlx":
@@ -132,6 +216,9 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
             elif backend == "qwen":
                 result = asr_model.transcribe(frame)
 
+            if final_busy is not None:
+                final_busy.clear()
+
             text = result.get("text", "").strip()
             detected_lang = result.get("language", lang_mode)
             audio_q.task_done()
@@ -140,7 +227,11 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
             if not text:
                 continue
 
-            utterance_id += 1
+            # 無音幻聴(「ご視聴ありがとうございました」等)は表示・翻訳・koepusの前に破棄
+            if is_probable_hallucination(text, result):
+                print(f"[幻聴フィルタ] uid={utterance_id} 破棄: {text!r}")
+                continue
+
             print(f"[timing] uid={utterance_id} audio={audio_sec:.2f}s asr={asr_sec:.2f}s aqlen={audio_q.qsize()}")
 
             # koepus へ wav + sidecar JSON を書き出す(失敗しても認識本体は止めない)
@@ -174,6 +265,8 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
                     translate_q.put((utterance_id, text, from_lang, to_lang))
             
         except Exception as e:
+            if final_busy is not None:
+                final_busy.clear()
             print(f"[文字起こしエラー]\n{e}", file=sys.stderr)
             import traceback
             traceback.print_exc()
@@ -182,12 +275,58 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
 FONT_MIN = 8
 FONT_MAX = 96
 FONT_DEFAULT = 14
+PARTIAL_FG = "gray50"  # 仮字幕(未確定)の文字色
 
 
-def start_pip_window(result_q, stop_ev, backend=None, registry=None, reload_cb=None, oov_queue=None, translate_enabled=False):
+HISTORY_LINES_DEFAULT = 3  # 字幕として画面に残す確定発話の行数
+
+
+def make_ui_state(translate_enabled=False, history_max=HISTORY_LINES_DEFAULT):
+    """PiPウィンドウの表示状態。確定発話は history に積んで複数行表示する。"""
+    return {
+        "history": [],  # [{"uid", "text", "translated"}] 古い順
+        "history_max": history_max,
+        "partial": None,
+        "partial_uid": None,
+        "translate_enabled": translate_enabled,
+    }
+
+
+def apply_result_message(state, kind, uid, payload):
+    """result_q のメッセージを表示状態に反映する。再描画が必要なら True。
+
+    uid 整合ルール:
+    - partial: 確定済みの最新 uid 以下は遅延到着として破棄
+    - text(確定): 履歴に追記(上限超過で古い行を破棄)。その uid 以前の仮字幕を消す
+    - translation: 履歴に残っている同 uid の行にだけ反映
+    """
+    if kind == "partial":
+        last_uid = state["history"][-1]["uid"] if state["history"] else None
+        if last_uid is not None and uid <= last_uid:
+            return False
+        state["partial"] = payload
+        state["partial_uid"] = uid
+        return True
+    if kind == "text":
+        state["history"].append({"uid": uid, "text": payload, "translated": None})
+        del state["history"][:-state["history_max"]]
+        if state["partial_uid"] is not None and state["partial_uid"] <= uid:
+            state["partial"] = None
+            state["partial_uid"] = None
+        return True
+    if kind == "translation":
+        for entry in state["history"]:
+            if entry["uid"] == uid:
+                entry["translated"] = payload
+                return True
+        return False
+    return False
+
+
+def start_pip_window(result_q, stop_ev, backend=None, registry=None, reload_cb=None, oov_queue=None, translate_enabled=False, history_lines=HISTORY_LINES_DEFAULT):
     pip = tk.Toplevel()
     pip.title("asrivia")
-    pip.geometry("600x180")
+    pip.geometry("600x240")
     pip.minsize(360, 120)
     pip.attributes("-topmost", True)
     pip.attributes("-alpha", 1.0)
@@ -206,7 +345,19 @@ def start_pip_window(result_q, stop_ev, backend=None, registry=None, reload_cb=N
         justify="left",
         anchor="nw",
     )
-    text_label.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=8)
+    text_label.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=(8, 0))
+
+    # 仮字幕(未確定)は履歴の下にグレーで表示
+    partial_label = tk.Label(
+        pip,
+        text="",
+        font=("Arial", FONT_DEFAULT),
+        wraplength=580,
+        justify="left",
+        anchor="nw",
+        fg=PARTIAL_FG,
+    )
+    partial_label.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(0, 8))
 
     def update_wraplength(event=None):
         try:
@@ -215,6 +366,7 @@ def start_pip_window(result_q, stop_ev, backend=None, registry=None, reload_cb=N
             return
         if w > 40:
             text_label.config(wraplength=w - 40)
+            partial_label.config(wraplength=w - 40)
 
     pip.bind("<Configure>", update_wraplength)
 
@@ -222,6 +374,7 @@ def start_pip_window(result_q, stop_ev, backend=None, registry=None, reload_cb=N
         new_size = max(FONT_MIN, min(FONT_MAX, font_size.get() + delta))
         font_size.set(new_size)
         text_label.config(font=("Arial", new_size))
+        partial_label.config(font=("Arial", new_size))
 
     btn_decrease = tk.Button(button_frame, text="－", width=2, command=lambda: change_font(-2))
     btn_decrease.pack(side=tk.LEFT, padx=2)
@@ -268,32 +421,27 @@ def start_pip_window(result_q, stop_ev, backend=None, registry=None, reload_cb=N
         btn_dict.pack(side=tk.LEFT, padx=4)
 
     # 現在表示中の発話状態
-    state = {"uid": None, "text": "", "translated": None, "translate_enabled": translate_enabled}
+    state = make_ui_state(translate_enabled=translate_enabled, history_max=history_lines)
 
     def render():
-        if state["text"] == "":
-            return
-        if state["translate_enabled"]:
-            tr = state["translated"] if state["translated"] is not None else "..."
-            text_label.config(text=f"{state['text']}\n→ {tr}")
-        else:
-            text_label.config(text=state["text"])
+        lines = []
+        for entry in state["history"]:
+            if state["translate_enabled"]:
+                tr = entry["translated"] if entry["translated"] is not None else "..."
+                lines.append(f"{entry['text']}\n→ {tr}")
+            else:
+                lines.append(entry["text"])
+        if lines:
+            text_label.config(text="\n".join(lines))
+        partial_label.config(text=state["partial"] or "")
 
     def poll_queue():
         try:
             while True:
                 msg = result_q.get_nowait()
                 kind, uid, payload = msg
-                if kind == "text":
-                    state["uid"] = uid
-                    state["text"] = payload
-                    state["translated"] = None
+                if apply_result_message(state, kind, uid, payload):
                     render()
-                elif kind == "translation":
-                    if uid == state["uid"]:
-                        state["translated"] = payload
-                        render()
-                    # 古い翻訳が遅れて到着した場合は破棄
                 result_q.task_done()
         except queue.Empty:
             pass
@@ -324,6 +472,7 @@ def main():
   python main.py --translate --translator gemma   # 高品質翻訳(TranslateGemma)
   python main.py --dict                           # 辞書登録UIのみ起動
   python main.py --dynamic-vad --koepus           # koepusコーパスへ自動書き出し
+  python main.py --dynamic-vad --live-captions    # 二段デコード(発話中にライブ仮字幕)
 
 ヒント: 全オプションは下の一覧を参照。`-h` でいつでもこの画面を表示できます。
 """,
@@ -342,6 +491,11 @@ def main():
     parser.add_argument("--min-record", type=float, default=0.5, help="最小録音時間[秒] (default: 0.5)")
     parser.add_argument("--max-record", type=float, default=5.0, help="最大録音時間[秒] (default: 5.0)")
     parser.add_argument("--overlap", type=float, default=0.0, help="オーバーラップ時間[秒] (default: 0.0)")
+    # 二段デコード(ライブ仮字幕)オプション
+    parser.add_argument("--live-captions", action="store_true", help="発話中にライブ仮字幕を表示(二段デコード。--dynamic-vad 必須, mlx/qwenバックエンドのみ)")
+    parser.add_argument("--first-model", type=str, default="mlx-community/whisper-small-mlx", help="仮字幕用の小型モデル(HFリポジトリパス, default: mlx-community/whisper-small-mlx)")
+    parser.add_argument("--live-interval", type=float, default=1.0, help="仮字幕の更新間隔[秒] (default: 1.0)")
+    parser.add_argument("--history-lines", type=int, default=HISTORY_LINES_DEFAULT, help=f"字幕として残す確定発話の行数 (default: {HISTORY_LINES_DEFAULT})")
     # koepus連携オプション
     parser.add_argument("--koepus", action="store_true", help="認識1回ごとにwav+JSONをkoepusのincoming/へ書き出す")
     parser.add_argument("--koepus-dir", type=Path, default=None, help="koepusのincomingディレクトリ(未指定時は環境変数KOEPUS_INCOMING_DIRを使用)")
@@ -393,9 +547,19 @@ def main():
         root.mainloop()
         return
 
+    # ライブ仮字幕の前提条件チェック(満たさなければ警告して無効化)
+    if args.live_captions:
+        if not args.dynamic_vad:
+            print("[ライブ字幕] --dynamic-vad が無効のため仮字幕を無効化します", file=sys.stderr)
+            args.live_captions = False
+        elif args.backend not in ("mlx", "qwen"):
+            print(f"[ライブ字幕] バックエンド {args.backend} は未対応のため仮字幕を無効化します(mlx/qwenのみ)", file=sys.stderr)
+            args.live_captions = False
+
     audio_q = queue.Queue()
     result_q = queue.Queue()
     stop_ev = threading.Event()
+    final_busy = threading.Event()
     oov_queue = queue.Queue() if args.backend == "hf" else None
 
     # hfバックエンド用: registryとreload_cbを事前準備
@@ -435,9 +599,16 @@ def main():
 
     threading.Thread(
         target=transcribe_audio_thread,
-        args=(audio_q, result_q, args.language, args.translate, args.backend, args.model, oov_queue, translate_q, koepus_cfg),
+        args=(audio_q, result_q, args.language, args.translate, args.backend, args.model, oov_queue, translate_q, koepus_cfg, final_busy),
         daemon=True
     ).start()
+
+    if args.live_captions:
+        threading.Thread(
+            target=live_caption_thread,
+            args=(result_q, args.first_model, args.language, args.live_interval, final_busy),
+            daemon=True
+        ).start()
 
     if args.translate:
         threading.Thread(
@@ -446,7 +617,7 @@ def main():
             daemon=True
         ).start()
 
-    start_pip_window(result_q, stop_ev, args.backend, hf_registry, hf_reload_cb, oov_queue, translate_enabled=args.translate)
+    start_pip_window(result_q, stop_ev, args.backend, hf_registry, hf_reload_cb, oov_queue, translate_enabled=args.translate, history_lines=args.history_lines)
 
 if __name__ == "__main__":
     main()
