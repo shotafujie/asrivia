@@ -14,6 +14,7 @@
 - **辞書登録UI**: 認識結果のOOV（未知語）候補からワンクリックで辞書追加
 - **言語自動判定**: 日本語/英語を自動で判別
 - **動的セグメンテーション**: 発話終了を自動検知して即座に認識処理を開始（低遅延モード）
+- **koepus連携**: 認識1回ごとにwav+仮説テキストをkoepus音声コーパスのincoming/へ自動書き出し（`--koepus`）
 
 ## 前提条件
 
@@ -222,6 +223,20 @@ python main.py --dynamic-vad --overlap 0.5
 python main.py --dynamic-vad --silence-threshold 0.02 --silence-duration 0.4 --min-record 0.3 --max-record 4.0 --overlap 0.3
 ```
 
+### koepus連携（音声コーパス自動収集）
+
+認識1回ごとにwav（発話区間）とJSON（仮説テキスト・信頼度・メタ情報）のペアを [koepus](https://github.com/shotafujie/koepus) の `incoming/` ディレクトリへ書き出せます。書き出しに失敗しても認識自体は止まりません。
+
+```bash
+export KOEPUS_INCOMING_DIR=/path/to/koepus-data/incoming
+python main.py --dynamic-vad --koepus
+```
+
+- `--koepus`: koepusへの書き出しを有効化
+- `--koepus-dir`: incomingディレクトリを直接指定（省略時は環境変数 `KOEPUS_INCOMING_DIR` を使用）。どちらも未設定の場合は起動時に警告を出して書き出しを無効のまま続行します
+- **`--dynamic-vad` の併用を推奨**: 固定3秒チャンクモードだと発話が途中で切れた状態でコーパスに入ってしまいます
+- **入力デバイスに注意**: BlackHole等のループバックデバイスを入力にしていると相手の声が混ざります。自分のマイクを入力にしているときだけ有効化してください
+
 ### 使用例
 
 ```bash
@@ -257,6 +272,9 @@ python main.py --backend mlx --model mlx-community/whisper-medium
 
 # 辞書登録UIのみ起動
 python main.py --dict
+
+# 動的VAD + koepusコーパスへ自動書き出し
+python main.py --dynamic-vad --koepus
 ```
 
 <img width="495" height="140" alt="image" src="https://github.com/user-attachments/assets/443a3a83-f6b5-422d-80b5-80d786ffe380" />

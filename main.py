@@ -1,12 +1,14 @@
 import mlx_whisper
 import time
 import audio2wav
+import koepus_writer
 import threading
 import queue
 import tkinter as tk
 import argparse
 import sys
 import os
+from pathlib import Path
 
 from asr.translator_gemma import GemmaTranslator
 from asr.translator_opus import OpusTranslator
@@ -47,11 +49,12 @@ def translate_worker_thread(translate_q, result_q, translator):
 
 
 # mainブランチ準拠: transcribe_audio_thread構造を統一、backend対応のみ追加
-def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, backend, model_name, oov_queue=None, translate_q=None):
+def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, backend, model_name, oov_queue=None, translate_q=None, koepus_cfg=None):
     """
     音声認識スレッド。バックエンドに応じて処理を切り替える。
     backend: 'mlx', 'openai', 'stable-ts', または 'hf'
     model_name: 使用するモデル名
+    koepus_cfg: koepus書き出し設定 dict({"dir", "backend", "model", "dynamic_vad"})。None なら無効
     """
     if backend == "mlx":
         print(f"[MLX] モデル: {model_name}")
@@ -139,6 +142,20 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
 
             utterance_id += 1
             print(f"[timing] uid={utterance_id} audio={audio_sec:.2f}s asr={asr_sec:.2f}s aqlen={audio_q.qsize()}")
+
+            # koepus へ wav + sidecar JSON を書き出す(失敗しても認識本体は止めない)
+            if koepus_cfg is not None:
+                try:
+                    koepus_writer.write_pair(
+                        koepus_cfg["dir"], frame,
+                        hypothesis=text,
+                        asr_model=f"{koepus_cfg['backend']}:{koepus_cfg['model']}",
+                        language=detected_lang,
+                        confidence=koepus_writer.extract_confidence(result),
+                        dynamic_vad=koepus_cfg["dynamic_vad"],
+                    )
+                except Exception as e:
+                    print(f"[koepus] 書き出し失敗: {e}", file=sys.stderr)
 
             # 認識テキストを即時UI表示
             result_q.put(("text", utterance_id, text))
@@ -306,6 +323,7 @@ def main():
   python main.py --backend mlx --model mlx-community/whisper-medium  # モデル指定
   python main.py --translate --translator gemma   # 高品質翻訳(TranslateGemma)
   python main.py --dict                           # 辞書登録UIのみ起動
+  python main.py --dynamic-vad --koepus           # koepusコーパスへ自動書き出し
 
 ヒント: 全オプションは下の一覧を参照。`-h` でいつでもこの画面を表示できます。
 """,
@@ -324,6 +342,9 @@ def main():
     parser.add_argument("--min-record", type=float, default=0.5, help="最小録音時間[秒] (default: 0.5)")
     parser.add_argument("--max-record", type=float, default=5.0, help="最大録音時間[秒] (default: 5.0)")
     parser.add_argument("--overlap", type=float, default=0.0, help="オーバーラップ時間[秒] (default: 0.0)")
+    # koepus連携オプション
+    parser.add_argument("--koepus", action="store_true", help="認識1回ごとにwav+JSONをkoepusのincoming/へ書き出す")
+    parser.add_argument("--koepus-dir", type=Path, default=None, help="koepusのincomingディレクトリ(未指定時は環境変数KOEPUS_INCOMING_DIRを使用)")
     args = parser.parse_args()
     
     # デフォルトモデル設定
@@ -341,6 +362,24 @@ def main():
 
     print(f"ASRバックエンド: {args.backend}")
     print(f"使用モデル: {args.model}")
+
+    # koepus連携設定の組み立て
+    koepus_cfg = None
+    if args.koepus:
+        koepus_dir = args.koepus_dir
+        if koepus_dir is None:
+            env_dir = os.environ.get("KOEPUS_INCOMING_DIR")
+            if env_dir:
+                koepus_dir = Path(env_dir)
+        if koepus_dir is None:
+            print("[koepus] --koepus-dir も環境変数 KOEPUS_INCOMING_DIR も未設定のため無効化します", file=sys.stderr)
+        else:
+            koepus_cfg = {
+                "dir": koepus_dir,
+                "backend": args.backend,
+                "model": args.model,
+                "dynamic_vad": args.dynamic_vad,
+            }
 
     root = tk.Tk()
     root.withdraw()
@@ -396,7 +435,7 @@ def main():
 
     threading.Thread(
         target=transcribe_audio_thread,
-        args=(audio_q, result_q, args.language, args.translate, args.backend, args.model, oov_queue, translate_q),
+        args=(audio_q, result_q, args.language, args.translate, args.backend, args.model, oov_queue, translate_q, koepus_cfg),
         daemon=True
     ).start()
 
