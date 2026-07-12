@@ -323,6 +323,24 @@ def apply_result_message(state, kind, uid, payload):
     return False
 
 
+def apply_edit(state, uid, new_text):
+    """確定字幕の手動編集を表示状態に反映する。再描画が必要なら True。
+
+    画面表示のみの編集(koepus・翻訳へは伝播しない)。
+    空文字への編集は誤操作とみなして棄却し、既存の翻訳表示は保持する。
+    """
+    new_text = new_text.strip()
+    if not new_text:
+        return False
+    for entry in state["history"]:
+        if entry["uid"] == uid:
+            if entry["text"] == new_text:
+                return False
+            entry["text"] = new_text
+            return True
+    return False
+
+
 def start_pip_window(result_q, stop_ev, backend=None, registry=None, reload_cb=None, oov_queue=None, translate_enabled=False, history_lines=HISTORY_LINES_DEFAULT):
     pip = tk.Toplevel()
     pip.title("asrivia")
@@ -337,15 +355,9 @@ def start_pip_window(result_q, stop_ev, backend=None, registry=None, reload_cb=N
     button_frame = tk.Frame(pip)
     button_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=4)
 
-    text_label = tk.Label(
-        pip,
-        text="認識結果がここに表示されます",
-        font=("Arial", FONT_DEFAULT),
-        wraplength=580,
-        justify="left",
-        anchor="nw",
-    )
-    text_label.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=(8, 0))
+    # 確定字幕は発話ごとに Label を並べる(ダブルクリックでその行だけ編集できるようにするため)
+    history_frame = tk.Frame(pip)
+    history_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=(8, 0))
 
     # 仮字幕(未確定)は履歴の下にグレーで表示
     partial_label = tk.Label(
@@ -359,13 +371,16 @@ def start_pip_window(result_q, stop_ev, backend=None, registry=None, reload_cb=N
     )
     partial_label.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(0, 8))
 
+    entry_labels = []  # render() が作り直す確定字幕 Label 群(wraplength/font 更新用)
+
     def update_wraplength(event=None):
         try:
             w = pip.winfo_width()
         except tk.TclError:
             return
         if w > 40:
-            text_label.config(wraplength=w - 40)
+            for lbl in entry_labels:
+                lbl.config(wraplength=w - 40)
             partial_label.config(wraplength=w - 40)
 
     pip.bind("<Configure>", update_wraplength)
@@ -373,8 +388,8 @@ def start_pip_window(result_q, stop_ev, backend=None, registry=None, reload_cb=N
     def change_font(delta):
         new_size = max(FONT_MIN, min(FONT_MAX, font_size.get() + delta))
         font_size.set(new_size)
-        text_label.config(font=("Arial", new_size))
         partial_label.config(font=("Arial", new_size))
+        render()
 
     btn_decrease = tk.Button(button_frame, text="－", width=2, command=lambda: change_font(-2))
     btn_decrease.pack(side=tk.LEFT, padx=2)
@@ -422,18 +437,78 @@ def start_pip_window(result_q, stop_ev, backend=None, registry=None, reload_cb=N
 
     # 現在表示中の発話状態
     state = make_ui_state(translate_enabled=translate_enabled, history_max=history_lines)
+    editing = {"uid": None}  # 編集中の確定発話 uid(編集中は再描画を保留)
 
     def render():
-        lines = []
+        # 編集中に作り直すと入力欄が消えるため、編集終了時の render() に任せる
+        if editing["uid"] is not None:
+            return
+        for w in history_frame.winfo_children():
+            w.destroy()
+        entry_labels.clear()
+        font = ("Arial", font_size.get())
+        try:
+            w = pip.winfo_width()
+        except tk.TclError:
+            return
+        wraplength = w - 40 if w > 40 else 580
+        if not state["history"]:
+            placeholder = tk.Label(
+                history_frame,
+                text="認識結果がここに表示されます",
+                font=font,
+                wraplength=wraplength,
+                justify="left",
+                anchor="nw",
+            )
+            placeholder.pack(side=tk.TOP, fill=tk.X)
+            entry_labels.append(placeholder)
         for entry in state["history"]:
             if state["translate_enabled"]:
                 tr = entry["translated"] if entry["translated"] is not None else "..."
-                lines.append(f"{entry['text']}\n→ {tr}")
+                line = f"{entry['text']}\n→ {tr}"
             else:
-                lines.append(entry["text"])
-        if lines:
-            text_label.config(text="\n".join(lines))
+                line = entry["text"]
+            lbl = tk.Label(
+                history_frame,
+                text=line,
+                font=font,
+                wraplength=wraplength,
+                justify="left",
+                anchor="nw",
+            )
+            lbl.pack(side=tk.TOP, fill=tk.X)
+            lbl.bind("<Double-Button-1>", lambda e, uid=entry["uid"]: begin_edit(uid))
+            entry_labels.append(lbl)
         partial_label.config(text=state["partial"] or "")
+
+    def begin_edit(uid):
+        if editing["uid"] is not None:
+            return
+        idx = next((i for i, e in enumerate(state["history"]) if e["uid"] == uid), None)
+        if idx is None:
+            return
+        editing["uid"] = uid
+        lbl = entry_labels[idx]
+        var = tk.StringVar(value=state["history"][idx]["text"])
+        editor = tk.Entry(history_frame, textvariable=var, font=("Arial", font_size.get()))
+        editor.pack(after=lbl, fill=tk.X)
+        lbl.pack_forget()
+        editor.focus_set()
+        editor.icursor(tk.END)
+
+        def finish(commit):
+            # render() が editor を destroy したときの FocusOut 再入を弾く
+            if editing["uid"] != uid:
+                return
+            editing["uid"] = None
+            if commit:
+                apply_edit(state, uid, var.get())
+            render()
+
+        editor.bind("<Return>", lambda e: finish(True))
+        editor.bind("<Escape>", lambda e: finish(False))
+        editor.bind("<FocusOut>", lambda e: finish(False))
 
     def poll_queue():
         try:
@@ -450,6 +525,7 @@ def start_pip_window(result_q, stop_ev, backend=None, registry=None, reload_cb=N
         else:
             pip.destroy()
     
+    render()
     poll_queue()
     pip.protocol("WM_DELETE_WINDOW", stop_ev.set)
     pip.mainloop()
