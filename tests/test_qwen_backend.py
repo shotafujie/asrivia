@@ -1,6 +1,6 @@
 """QwenASRBackend(opt-in バックエンド / MLX実装)のユニットテスト。
 
-実モデル(`Qwen/Qwen3-ASR-0.6B`)に依存させないよう、`mlx_qwen3_asr` を
+実モデル(`Qwen/Qwen3-ASR-1.7B`)に依存させないよう、`mlx_qwen3_asr` を
 ダミーモジュールとして `sys.modules` に注入して検証する。検証する契約は
 `asr/biased_whisper.py` の `BiasingWhisperBackend` と同じく
 「numpy float32 @16kHz を受け取り Whisper 互換 dict を返す」こと。
@@ -98,7 +98,7 @@ def test_audio_passed_as_16k_tuple():
 
 def test_session_loaded_with_default_model():
     _make_backend()
-    assert _FakeSession.last_init["model"] == "Qwen/Qwen3-ASR-0.6B"
+    assert _FakeSession.last_init["model"] == "Qwen/Qwen3-ASR-1.7B"
 
 
 def test_session_loaded_once_and_reused():
