@@ -24,11 +24,11 @@ _LANG_MAP = {"ja": "Japanese", "en": "English"}
 
 
 class QwenASRBackend:
-    """Qwen3-ASR 0.6B バックエンド(MLX)。transcribe(frame) -> {"text", "language"}。"""
+    """Qwen3-ASR 1.7B バックエンド(MLX)。transcribe(frame) -> {"text", "language"}。"""
 
     def __init__(
         self,
-        model_name: str = "Qwen/Qwen3-ASR-0.6B",
+        model_name: str = "Qwen/Qwen3-ASR-1.7B",
         language: str = "ja",
     ):
         self.model_name = model_name

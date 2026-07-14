@@ -94,7 +94,7 @@ pip install transformers torch pyaudio
 pip install mlx-qwen3-asr pyaudio
 ```
 
-Apple Silicon専用（MLX）。torch/transformersは不要です。初回実行時に `Qwen/Qwen3-ASR-0.6B` が自動ダウンロードされます。`uv sync` を使う場合は不要です（`pyproject.toml` に含まれています）。
+Apple Silicon専用（MLX）。torch/transformersは不要です。初回実行時に `Qwen/Qwen3-ASR-1.7B` が自動ダウンロードされます。`uv sync` を使う場合は不要です（`pyproject.toml` に含まれています）。
 
 ### 翻訳機能を使用する場合
 
@@ -144,7 +144,7 @@ python main.py --backend {mlx|openai|stable-ts|hf|qwen}
   - `openai`: PyTorch版Whisperを使用（クロスプラットフォーム）
   - `stable-ts`: Whisper + Silero VAD（ハルシネーション抑制）
   - `hf`: HuggingFace Whisper + コンテキストバイアシング（専門用語をブースト）
-  - `qwen`: Qwen3-ASR 0.6B（MLX実装）。日本語精度が高く、Python/GitHub等の英字をカタカナ化せず出力できる。Apple Silicon専用、biasing非対応
+  - `qwen`: Qwen3-ASR 1.7B（MLX実装）。日本語精度が高く、Python/GitHub等の英字をカタカナ化せず出力できる。Apple Silicon専用、biasing非対応
 
 ### コンテキストバイアシング（hfバックエンド）
 
@@ -189,8 +189,8 @@ python main.py --model {モデル名}
   - hfバックエンド: HuggingFaceモデルID
     - デフォルト: `openai/whisper-large-v3-turbo`
   - qwenバックエンド: Qwen3-ASR モデルID
-    - デフォルト: `Qwen/Qwen3-ASR-0.6B`
-    - 例: `Qwen/Qwen3-ASR-1.7B`（より高精度・要メモリ）
+    - デフォルト: `Qwen/Qwen3-ASR-1.7B`
+    - 例: `Qwen/Qwen3-ASR-0.6B`（軽量・省メモリ）
 
 ### 動的セグメンテーション（低遅延モード）
 
