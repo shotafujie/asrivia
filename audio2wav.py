@@ -22,7 +22,81 @@ def get_pyaudio():
         return _pa_instance
 
 
-class AudioRecorder:
+class _RecoveringStreamRecorder:
+    """入力ストリームの読み取りループを持つ録音器の共通処理。
+
+    BT機器の unpair 等で stream.read() が OSError(PaMacCore -50 等)を出しても、
+    ストリームを再オープンして録音を継続する。指定デバイスでの失敗が
+    MAX_REOPEN_RETRIES 回を超えたら device_index を None(OS既定デバイス)に
+    フォールバックする。これは macOS がBT切断時に既定入力を自動で切り替える
+    挙動に追従させるため。
+    """
+
+    MAX_REOPEN_RETRIES = 3
+    REOPEN_BACKOFF_SECONDS = 0.5
+
+    def _open_stream(self, pa):
+        return pa.open(rate=self.rate,
+                        channels=self.channels,
+                        format=self.format,
+                        input=True,
+                        input_device_index=self.device_index,
+                        frames_per_buffer=self.chunk)
+
+    def record_audio(self):
+        pa = get_pyaudio()
+        with _pa_lock:
+            stream = self._open_stream(pa)
+        self.status = "ok"
+        failures = 0
+
+        try:
+            while not self.stop_event.is_set():
+                if stream is None:
+                    if self.stop_event.wait(self.REOPEN_BACKOFF_SECONDS):
+                        break
+                    try:
+                        with _pa_lock:
+                            stream = self._open_stream(pa)
+                    except OSError:
+                        failures += 1
+                        self.status = "reconnecting"
+                        if failures > self.MAX_REOPEN_RETRIES:
+                            self.device_index = None
+                    continue
+
+                try:
+                    data = stream.read(self.chunk, exception_on_overflow=False)
+                except OSError:
+                    failures += 1
+                    self.status = "reconnecting"
+                    with _pa_lock:
+                        try:
+                            stream.stop_stream()
+                            stream.close()
+                        except OSError:
+                            pass
+                    stream = None
+                    if failures > self.MAX_REOPEN_RETRIES:
+                        self.device_index = None
+                    continue
+
+                failures = 0
+                self.status = "ok"
+                self.audio_queue.put(np.frombuffer(data, dtype=np.float32))
+        finally:
+            self.status = "stopped"
+            if stream is not None:
+                with _pa_lock:
+                    try:
+                        stream.stop_stream()
+                        stream.close()
+                    except OSError:
+                        pass
+            # 共有インスタンスのため terminate() しない(cleanup() で一度だけ)。
+
+
+class AudioRecorder(_RecoveringStreamRecorder):
     def __init__(self, rate=16000, chunk=1024, channels=1, record_seconds=3, device_index=None):
         self.rate = rate
         self.chunk = chunk
@@ -33,25 +107,7 @@ class AudioRecorder:
         self.stop_event = threading.Event()
         self.device_index = device_index
         self.segment_uid = 0
-
-    def record_audio(self):
-        pa = get_pyaudio()
-        with _pa_lock:
-            stream = pa.open(rate=self.rate,
-                        channels=self.channels,
-                        format=self.format,
-                        input=True,
-                        input_device_index=self.device_index,
-                        frames_per_buffer=self.chunk)
-
-        try:
-            while not self.stop_event.is_set():
-                data = stream.read(self.chunk, exception_on_overflow=False)
-                self.audio_queue.put(np.frombuffer(data, dtype=np.float32))
-        finally:
-            stream.stop_stream()
-            stream.close()
-            # 共有インスタンスのため terminate() しない(cleanup() で一度だけ)。
+        self.status = "ok"
 
     def start_recording(self):
         self.stop_event.clear()
@@ -88,7 +144,7 @@ class AudioRecorder:
         return np.concatenate(audio_data) if audio_data else None
 
 
-class DynamicAudioRecorder:
+class DynamicAudioRecorder(_RecoveringStreamRecorder):
     """VADベースの動的セグメンテーションをサポートする音声レコーダー"""
 
     def __init__(self, rate=16000, chunk=1024, channels=1,
@@ -110,6 +166,7 @@ class DynamicAudioRecorder:
         self.stop_event = threading.Event()
         self.overlap_buffer = []
         self.device_index = device_index
+        self.status = "ok"
 
         # ライブ仮字幕(first pass)用: 収集中セグメントの共有スナップショット。
         # get_audio_chunk(録音消費スレッド)と get_partial_buffer(ライブ字幕スレッド)の
@@ -121,26 +178,6 @@ class DynamicAudioRecorder:
 
     def _calculate_energy(self, audio_chunk):
         return np.sqrt(np.mean(audio_chunk ** 2))
-
-    def record_audio(self):
-        pa = get_pyaudio()
-        with _pa_lock:
-            stream = pa.open(rate=self.rate,
-                            channels=self.channels,
-                            format=self.format,
-                            input=True,
-                            input_device_index=self.device_index,
-                            frames_per_buffer=self.chunk)
-
-        try:
-            while not self.stop_event.is_set():
-                data = stream.read(self.chunk, exception_on_overflow=False)
-                chunk_array = np.frombuffer(data, dtype=np.float32)
-                self.audio_queue.put(chunk_array)
-        finally:
-            stream.stop_stream()
-            stream.close()
-            # 共有インスタンスのため terminate() しない(cleanup() で一度だけ)。
 
     def start_recording(self):
         self.stop_event.clear()
