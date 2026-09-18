@@ -8,7 +8,7 @@ import time
 
 import numpy as np
 
-from audio2wav import DynamicAudioRecorder
+from audio2wav import AudioRecorder, DynamicAudioRecorder
 
 CHUNK = 1024
 
@@ -77,8 +77,35 @@ def test_falls_back_to_default_device_after_repeated_failures():
 
 
 def test_status_reflects_reconnection():
-    """読み取り失敗中は status が reconnecting になり、復旧後は ok に戻る。"""
+    """読み取り失敗中は status が reconnecting になり、復旧後は ok・停止後は stopped になる。"""
     rec = DynamicAudioRecorder(max_record_seconds=0.2)
+    rec.REOPEN_BACKOFF_SECONDS = 0.05
+    fake = _FailNTimesStream(fail_times=3)
+    rec._open_stream = lambda pa: fake
+
+    rec.start_recording()
+
+    seen_reconnecting = False
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        if rec.status == "reconnecting":
+            seen_reconnecting = True
+            break
+        time.sleep(0.005)
+    assert seen_reconnecting, "reconnecting 状態が一度も観測されなかった"
+
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline and rec.status != "ok":
+        time.sleep(0.005)
+    assert rec.status == "ok"
+
+    rec.stop_recording()
+    assert rec.status == "stopped"
+
+
+def test_fixed_recorder_recovers_from_transient_read_error():
+    """固定長録音の AudioRecorder も同じ復旧処理を継承している。"""
+    rec = AudioRecorder(record_seconds=0.2)
     rec.REOPEN_BACKOFF_SECONDS = 0.01
     fake = _FailNTimesStream(fail_times=2)
     rec._open_stream = lambda pa: fake
@@ -87,4 +114,5 @@ def test_status_reflects_reconnection():
     time.sleep(0.3)
     rec.stop_recording()
 
-    assert rec.status == "stopped"
+    assert not rec.audio_queue.empty()
+    assert fake.read_calls > 2
