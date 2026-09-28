@@ -32,7 +32,7 @@
 
 ### ソフトウェア要件
 
-- Python 3.9以上
+- Python 3.9以上（macOS 27 では 3.11 以上が必須。`.python-version` で 3.11.15 に固定）
 - ffmpeg（openaiバックエンド使用時）
 
 ## セットアップ
@@ -42,6 +42,10 @@
 ```bash
 # 依存関係のインストール
 uv sync
+
+# macOS 27 で pyaudio のビルドが `ld: tapi error: malformed file` で失敗する場合は
+# Command Line Tools のリンカを使う
+DEVELOPER_DIR=/Library/Developer/CommandLineTools uv sync
 
 # 実行
 uv run python main.py
