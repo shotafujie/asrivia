@@ -76,3 +76,13 @@ def test_open_without_prefill_keeps_input(launcher):
     dw.entry.insert(0, "書きかけ")
     launcher.open()
     assert dw.entry.get() == "書きかけ"
+
+
+# TC-022-1
+def test_add_with_reading_registers_reading(launcher):
+    dw = launcher.open()
+    dw.entry.insert(0, "Claude")
+    dw.reading_entry.insert(0, "クロード")
+    dw._on_add()
+    assert launcher.registry.get("Claude").reading == "クロード"
+    assert dw.reading_entry.get() == ""

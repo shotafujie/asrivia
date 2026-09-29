@@ -157,11 +157,13 @@ python main.py --backend {mlx|openai|stable-ts|hf|qwen}
 ```json
 [
   {"word": "Agile", "boost": 2.0, "note": ""},
-  {"word": "Kubernetes", "boost": 2.5, "note": "infra"}
+  {"word": "Kubernetes", "boost": 2.5, "note": "infra"},
+  {"word": "Claude", "boost": 2.0, "note": "", "reading": "クロード"}
 ]
 ```
 
 - `boost`: 大きいほど強く優先（目安: 1.5〜3.0）
+- `reading`（任意）: 認識結果にこの読みが出たら `word` に置き換える（例: 「クロード」→ `Claude`）。`,` / `、` 区切りで複数指定でき、長い読みが優先される。hf / qwen バックエンドの確定字幕に適用され、翻訳・koepus にも置換後の文が渡る。英語の登録語がカタカナで出る場合に確実に効く
 - ファイルは `mtime` を監視して自動リロードされます
 - PiPウィンドウの `📚` ボタンから登録UIも開けます
 - 効き方はバックエンドで異なります

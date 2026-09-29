@@ -167,6 +167,12 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
     else:
         raise ValueError(f"未対応のバックエンド: {backend}")
 
+    # 辞書の「読み」置換(辞書が効くバックエンドのみ。context では直らないカタカナ化を直す)
+    reading_replacer = None
+    if backend in ("hf", "qwen"):
+        from asr.biasing.readings import ReadingReplacer
+        reading_replacer = ReadingReplacer("words.json")
+
     while True:
         try:
             item = audio_q.get()
@@ -221,6 +227,8 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
                 final_busy.clear()
 
             text = result.get("text", "").strip()
+            if reading_replacer is not None:
+                text = reading_replacer.apply(text)
             detected_lang = result.get("language", lang_mode)
             audio_q.task_done()
             asr_sec = time.time() - t_asr_start

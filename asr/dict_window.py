@@ -56,6 +56,14 @@ class DictWindow:
         self.note_entry = tk.Entry(input_frame, width=30)
         self.note_entry.grid(row=2, column=1, padx=5, pady=5)
 
+        tk.Label(input_frame, text="読み（任意）:").grid(row=3, column=0, sticky=tk.W)
+        self.reading_entry = tk.Entry(input_frame, width=30)
+        self.reading_entry.grid(row=3, column=1, padx=5, pady=5)
+        tk.Label(
+            input_frame, text="認識結果にこの読みが出たら単語に置換（例: クロード）。「,」「、」で複数",
+            fg="gray",
+        ).grid(row=4, column=0, columnspan=3, sticky=tk.W)
+
         # --- Word list section ---
         list_frame = tk.LabelFrame(self.win, text="登録済み単語", padx=10, pady=5)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
@@ -85,13 +93,15 @@ class DictWindow:
         word = self.entry.get().strip()
         boost = self.boost_var.get()
         note = self.note_entry.get().strip()
+        reading = self.reading_entry.get().strip()
         if not word:
             return
-        self.registry.add(word, boost, note)
+        self.registry.add(word, boost, note, reading)
         if self.reload_cb:
             self.reload_cb()
         self.entry.delete(0, tk.END)
         self.note_entry.delete(0, tk.END)
+        self.reading_entry.delete(0, tk.END)
         self.boost_var.set(2.0)
         self._refresh_list()
 
@@ -120,6 +130,8 @@ class DictWindow:
             )
             del_btn.pack(side=tk.LEFT, padx=2)
 
+            if bw.reading:
+                tk.Label(row, text=f"読み: {bw.reading}", fg="gray").pack(side=tk.LEFT, padx=5)
             if bw.note:
                 tk.Label(row, text=bw.note, fg="gray").pack(side=tk.LEFT, padx=5)
 
