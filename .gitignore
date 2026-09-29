@@ -3,3 +3,6 @@ __pycache__/
 *.pyo
 .venv/
 words.json
+
+# ベンチマークのローカルデータ(固有名詞・発話内容を含むためコミットしない)
+benchmarks/*/local/

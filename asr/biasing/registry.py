@@ -12,6 +12,7 @@ class BiasWord:
     word: str
     boost: float = 2.0
     note: str = ""
+    reading: str = ""  # 認識結果に現れたら word へ置き換える読み(`,`/`、` 区切りで複数可)
 
 
 class WordRegistry:
@@ -35,6 +36,7 @@ class WordRegistry:
                     word=entry["word"],
                     boost=entry.get("boost", 2.0),
                     note=entry.get("note", ""),
+                    reading=entry.get("reading", ""),
                 )
                 registry._words[bw.word] = bw
         return registry
@@ -47,8 +49,8 @@ class WordRegistry:
         data = [asdict(w) for w in self._words.values()]
         p.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    def add(self, word: str, boost: float = 2.0, note: str = ""):
-        self._words[word] = BiasWord(word=word, boost=boost, note=note)
+    def add(self, word: str, boost: float = 2.0, note: str = "", reading: str = ""):
+        self._words[word] = BiasWord(word=word, boost=boost, note=note, reading=reading)
         if self._path:
             self.save()
 
@@ -60,6 +62,14 @@ class WordRegistry:
     def update_boost(self, word: str, boost: float):
         if word in self._words:
             self._words[word].boost = boost
+            if self._path:
+                self.save()
+
+    def update_entry(self, word: str, boost: float, reading: str):
+        """boost と読みを更新する(メモは保つ)。"""
+        if word in self._words:
+            self._words[word].boost = boost
+            self._words[word].reading = reading
             if self._path:
                 self.save()
 

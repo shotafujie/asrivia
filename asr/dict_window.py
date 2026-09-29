@@ -56,6 +56,14 @@ class DictWindow:
         self.note_entry = tk.Entry(input_frame, width=30)
         self.note_entry.grid(row=2, column=1, padx=5, pady=5)
 
+        tk.Label(input_frame, text="読み（任意）:").grid(row=3, column=0, sticky=tk.W)
+        self.reading_entry = tk.Entry(input_frame, width=30)
+        self.reading_entry.grid(row=3, column=1, padx=5, pady=5)
+        tk.Label(
+            input_frame, text="認識結果にこの読みが出たら単語に置換（例: クロード）。「,」「、」で複数",
+            fg="gray",
+        ).grid(row=4, column=0, columnspan=3, sticky=tk.W)
+
         # --- Word list section ---
         list_frame = tk.LabelFrame(self.win, text="登録済み単語", padx=10, pady=5)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
@@ -85,13 +93,15 @@ class DictWindow:
         word = self.entry.get().strip()
         boost = self.boost_var.get()
         note = self.note_entry.get().strip()
+        reading = self.reading_entry.get().strip()
         if not word:
             return
-        self.registry.add(word, boost, note)
+        self.registry.add(word, boost, note, reading)
         if self.reload_cb:
             self.reload_cb()
         self.entry.delete(0, tk.END)
         self.note_entry.delete(0, tk.END)
+        self.reading_entry.delete(0, tk.END)
         self.boost_var.set(2.0)
         self._refresh_list()
 
@@ -120,6 +130,8 @@ class DictWindow:
             )
             del_btn.pack(side=tk.LEFT, padx=2)
 
+            if bw.reading:
+                tk.Label(row, text=f"読み: {bw.reading}", fg="gray").pack(side=tk.LEFT, padx=5)
             if bw.note:
                 tk.Label(row, text=bw.note, fg="gray").pack(side=tk.LEFT, padx=5)
 
@@ -129,34 +141,12 @@ class DictWindow:
             self.reload_cb()
         self._refresh_list()
 
-    def _on_edit(self, word: str):
-        """Open a simple dialog to edit boost value."""
+    def _on_edit(self, word: str) -> "_EditDialog | None":
+        """登録済みの語の boost と読みを編集するダイアログを開く。"""
         bw = self.registry.get(word)
         if not bw:
-            return
-
-        dialog = tk.Toplevel(self.win)
-        dialog.title(f"編集: {word}")
-        dialog.geometry("300x150")
-
-        tk.Label(dialog, text=f"単語: {word}").pack(pady=5)
-        tk.Label(dialog, text="boost:").pack()
-        boost_var = tk.DoubleVar(value=bw.boost)
-        scale = tk.Scale(
-            dialog, variable=boost_var,
-            from_=0.5, to=5.0, resolution=0.5,
-            orient=tk.HORIZONTAL, length=200,
-        )
-        scale.pack()
-
-        def apply():
-            self.registry.update_boost(word, boost_var.get())
-            if self.reload_cb:
-                self.reload_cb()
-            self._refresh_list()
-            dialog.destroy()
-
-        tk.Button(dialog, text="適用", command=apply).pack(pady=10)
+            return None
+        return _EditDialog(self, bw)
 
     def _poll_oov(self):
         """Poll OOV candidate queue and display suggestions."""
@@ -197,3 +187,76 @@ class DictWindow:
         # Refresh OOV display to remove registered word
         for widget in self.oov_inner.winfo_children():
             widget.destroy()
+
+    def prefill(self, text: str):
+        """単語欄を text で置き換えて全選択する(利用者が語だけに削る前提)。"""
+        self.entry.delete(0, tk.END)
+        self.entry.insert(0, text)
+        self.entry.select_range(0, tk.END)
+        self.entry.icursor(tk.END)
+
+
+class _EditDialog:
+    """登録済みの語の boost と読みを編集するダイアログ。"""
+
+    def __init__(self, owner: DictWindow, bw):
+        self.owner = owner
+        self.word = bw.word
+        self.dialog = tk.Toplevel(owner.win)
+        self.dialog.title(f"編集: {bw.word}")
+        self.dialog.geometry("360x220")
+
+        tk.Label(self.dialog, text=f"単語: {bw.word}").pack(pady=5)
+        tk.Label(self.dialog, text="boost:").pack()
+        self.boost_var = tk.DoubleVar(value=bw.boost)
+        tk.Scale(
+            self.dialog, variable=self.boost_var,
+            from_=0.5, to=5.0, resolution=0.5,
+            orient=tk.HORIZONTAL, length=200,
+        ).pack()
+
+        tk.Label(self.dialog, text="読み（「,」「、」で複数）:").pack()
+        self.reading_entry = tk.Entry(self.dialog, width=34)
+        self.reading_entry.insert(0, bw.reading)
+        self.reading_entry.pack(padx=10)
+
+        tk.Button(self.dialog, text="適用", command=self.apply).pack(pady=10)
+
+    def apply(self):
+        owner = self.owner
+        owner.registry.update_entry(
+            self.word, self.boost_var.get(), self.reading_entry.get().strip()
+        )
+        if owner.reload_cb:
+            owner.reload_cb()
+        owner._refresh_list()
+        self.dialog.destroy()
+
+
+class DictLauncher:
+    """辞書ウィンドウを1つに保って開く。開いていれば作り直さず前面に出す。"""
+
+    def __init__(
+        self,
+        parent: tk.Misc,
+        registry: WordRegistry,
+        reload_cb: Callable[[], None] | None = None,
+        oov_queue=None,
+    ):
+        self.parent = parent
+        self.registry = registry
+        self.reload_cb = reload_cb
+        self.oov_queue = oov_queue
+        self._window: DictWindow | None = None
+
+    def open(self, prefill: str | None = None) -> DictWindow:
+        dw = self._window
+        if dw is None or not dw.win.winfo_exists():
+            dw = DictWindow(self.parent, self.registry, self.reload_cb, self.oov_queue)
+            self._window = dw
+        if prefill is not None:
+            dw.prefill(prefill)
+        dw.win.deiconify()
+        dw.win.lift()
+        dw.entry.focus_set()
+        return dw
