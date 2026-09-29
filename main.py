@@ -342,6 +342,14 @@ def apply_edit(state, uid, new_text):
     return False
 
 
+def dict_prefill_text(state, uid):
+    """確定字幕 uid から辞書登録を開くときの登録文(表示中の原文。翻訳は含まない)。"""
+    for entry in state["history"]:
+        if entry["uid"] == uid:
+            return entry["text"]
+    return None
+
+
 def start_pip_window(result_q, stop_ev, backend=None, registry=None, reload_cb=None, oov_queue=None, translate_enabled=False, history_lines=HISTORY_LINES_DEFAULT):
     pip = tk.Toplevel()
     pip.title("asrivia")
@@ -429,11 +437,11 @@ def start_pip_window(result_q, stop_ev, backend=None, registry=None, reload_cb=N
         device_menu.pack(side=tk.LEFT, padx=4)
 
     # 辞書ボタン（辞書が効くバックエンド: hf / qwen のときのみ表示）
+    dict_launcher = None
     if registry is not None:
-        from asr.dict_window import DictWindow
-        def open_dict_window():
-            DictWindow(pip, registry, reload_cb, oov_queue)
-        btn_dict = tk.Button(button_frame, text="📚", command=open_dict_window)
+        from asr.dict_window import DictLauncher
+        dict_launcher = DictLauncher(pip, registry, reload_cb, oov_queue)
+        btn_dict = tk.Button(button_frame, text="📚", command=lambda: dict_launcher.open())
         btn_dict.pack(side=tk.LEFT, padx=4)
 
     # 現在表示中の発話状態
@@ -480,8 +488,23 @@ def start_pip_window(result_q, stop_ev, backend=None, registry=None, reload_cb=N
             )
             lbl.pack(side=tk.TOP, fill=tk.X)
             lbl.bind("<Double-Button-1>", lambda e, uid=entry["uid"]: begin_edit(uid))
+            if dict_launcher is not None:
+                # macOS(aqua)の右クリックは Button-2 / Control+クリック、他は Button-3
+                for seq in ("<Button-2>", "<Button-3>", "<Control-Button-1>"):
+                    lbl.bind(seq, lambda e, uid=entry["uid"]: show_caption_menu(e, uid))
             entry_labels.append(lbl)
         partial_label.config(text=state["partial"] or "")
+
+    def show_caption_menu(event, uid):
+        text = dict_prefill_text(state, uid)
+        if text is None:
+            return
+        menu = tk.Menu(pip, tearoff=0)
+        menu.add_command(label="辞書に登録…", command=lambda: dict_launcher.open(prefill=text))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
 
     def begin_edit(uid):
         if editing["uid"] is not None:

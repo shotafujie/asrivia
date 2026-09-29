@@ -197,3 +197,39 @@ class DictWindow:
         # Refresh OOV display to remove registered word
         for widget in self.oov_inner.winfo_children():
             widget.destroy()
+
+    def prefill(self, text: str):
+        """単語欄を text で置き換えて全選択する(利用者が語だけに削る前提)。"""
+        self.entry.delete(0, tk.END)
+        self.entry.insert(0, text)
+        self.entry.select_range(0, tk.END)
+        self.entry.icursor(tk.END)
+
+
+class DictLauncher:
+    """辞書ウィンドウを1つに保って開く。開いていれば作り直さず前面に出す。"""
+
+    def __init__(
+        self,
+        parent: tk.Misc,
+        registry: WordRegistry,
+        reload_cb: Callable[[], None] | None = None,
+        oov_queue=None,
+    ):
+        self.parent = parent
+        self.registry = registry
+        self.reload_cb = reload_cb
+        self.oov_queue = oov_queue
+        self._window: DictWindow | None = None
+
+    def open(self, prefill: str | None = None) -> DictWindow:
+        dw = self._window
+        if dw is None or not dw.win.winfo_exists():
+            dw = DictWindow(self.parent, self.registry, self.reload_cb, self.oov_queue)
+            self._window = dw
+        if prefill is not None:
+            dw.prefill(prefill)
+        dw.win.deiconify()
+        dw.win.lift()
+        dw.entry.focus_set()
+        return dw
