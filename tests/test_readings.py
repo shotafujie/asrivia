@@ -118,3 +118,21 @@ def test_broken_words_json_at_startup_returns_text_unchanged(tmp_path):
     p.write_text("[{", encoding="utf-8")
     r = ReadingReplacer(str(p))
     assert r.apply("クロード") == "クロード"
+
+
+# TC-023-1
+def test_hiragana_reading_matches_katakana_output(tmp_path):
+    r, _ = _replacer(tmp_path, [{"word": "Claude Code", "reading": "くろーどこーど"}])
+    assert r.apply("クロードコードで実装した") == "Claude Codeで実装した"
+
+
+# TC-023-2
+def test_katakana_reading_matches_hiragana_output(tmp_path):
+    r, _ = _replacer(tmp_path, [{"word": "Claude", "reading": "クロード"}])
+    assert r.apply("くろーどさん") == "Claudeさん"
+
+
+# TC-023-3
+def test_unmatched_text_keeps_its_kana(tmp_path):
+    r, _ = _replacer(tmp_path, [{"word": "Claude", "reading": "くろーど"}])
+    assert r.apply("クロードとくろーど、ひらがなのまま") == "ClaudeとClaude、ひらがなのまま"

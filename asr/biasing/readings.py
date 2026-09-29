@@ -14,6 +14,14 @@ from .registry import WordRegistry
 _SEPARATORS = re.compile(r"[,、，]")
 
 
+def _to_katakana(text: str) -> str:
+    return "".join(chr(ord(c) + 0x60) if "\u3041" <= c <= "\u3096" else c for c in text)
+
+
+def _to_hiragana(text: str) -> str:
+    return "".join(chr(ord(c) - 0x60) if "\u30a1" <= c <= "\u30f6" else c for c in text)
+
+
 def _parse_readings(reading: str) -> list[str]:
     return [r.strip() for r in _SEPARATORS.split(reading) if r.strip()]
 
@@ -45,7 +53,9 @@ class ReadingReplacer:
         table = {}
         for bw in registry.all():
             for r in _parse_readings(bw.reading):
-                table[r] = bw.word
+                # IME ではひらがなで入力されがちなので、ひらがな・カタカナの両方で照合する
+                for variant in (r, _to_katakana(r), _to_hiragana(r)):
+                    table[variant] = bw.word
         self._table = table
         # 長い読みを先に試す(「クロードコード」を「クロード」より優先)
         alts = sorted(table, key=len, reverse=True)
