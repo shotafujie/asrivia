@@ -168,7 +168,7 @@ python main.py --backend {mlx|openai|stable-ts|hf|qwen}
 - PiPウィンドウの `📚` ボタンから登録UIも開けます
 - 効き方はバックエンドで異なります
   - `hf`: デコード時に登録語のトークンへ加点する（`boost` が効く）
-  - `qwen`: 登録語を並べて Qwen3-ASR のシステムプロンプト（context）に渡す。`boost` は使わない。モデルが単語リストをそのまま出力した場合（短い発話で起こりうる）は、その発話だけ context なしで認識し直す。効果の測定は `benchmarks/qwen-context/` を参照
+  - `qwen`: 登録語を並べて Qwen3-ASR のシステムプロンプト（context）に渡す。`boost` は使わない。モデルが単語リストをそのまま出力した場合（無音・雑音の短い区間で起こりやすい）は、その区間を捨てる。登録語が2語以下だとこの検出が働かないため、3語以上の登録を推奨。効果の測定は `benchmarks/qwen-context/` を参照
 
 ### 辞書登録UIのみ起動
 

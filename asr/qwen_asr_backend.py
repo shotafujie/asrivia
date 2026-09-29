@@ -13,8 +13,9 @@ Whisper 系を大きく上回り、英字(Python/GitHub 等)をカタカナ化�
 並べて渡す。hf の logits 加点と違いモデルへの「ヒント」なので効き目は保証されない。
 効果は `benchmarks/qwen-context/` で測る。words.json は mtime を見て自動で読み直す。
 
-短い発話ではモデルが context の単語リストをそのまま出力することがある(ベンチで観測)。
-出力に登録語が LEAK_MIN_WORDS 語以上含まれたら漏れとみなし、context なしで認識し直す。
+モデルが context の単語リストをそのまま出力することがある(実機では無音・雑音の短い区間で多発)。
+出力に異なる登録語が LEAK_MIN_WORDS 語以上含まれたら漏れとみなし、その区間を捨てる(空文字を返す)。
+再認識すると漏れのたびに認識時間が倍になり、キューが詰まるため。
 """
 
 from __future__ import annotations
@@ -106,12 +107,11 @@ class QwenASRBackend:
         result = self.session.transcribe(
             (audio, SAMPLE_RATE), language=language, context=self.context
         )
-        if self.context and self._is_context_leak(result.text):
-            print("[Qwen3-ASR/MLX] context の漏れを検出したため context なしで再認識")
-            result = self.session.transcribe(
-                (audio, SAMPLE_RATE), language=language, context=""
-            )
+        text = result.text.strip()
+        if self.context and self._is_context_leak(text):
+            print("[Qwen3-ASR/MLX] context の漏れを検出したため区間を破棄")
+            text = ""
         return {
-            "text": result.text.strip(),
+            "text": text,
             "language": self.language,
         }

@@ -188,8 +188,8 @@ def test_build_context_empty():
 
 
 # --- context 漏れガード ------------------------------------------------------
-# 短い発話で、モデルが context の単語リストをそのまま出力することがある(ベンチで観測)。
-# 出力に登録語が3語以上含まれたら漏れとみなし、context なしで認識し直す。
+# モデルが context の単語リストをそのまま出力することがある(実機では無音・雑音の短い区間で多発)。
+# 出力に異なる登録語が3語以上含まれたら漏れとみなし、その区間を捨てる(空文字を返す)。
 
 
 def _leaky_reply(kwargs):
@@ -203,23 +203,22 @@ def _backend_with_words(tmp_path, words):
     return _make_backend(language="ja", registry_path=str(p))
 
 
-# TC-006-1
-def test_context_leak_is_retried_without_context(tmp_path):
+# TC-024-1
+def test_context_leak_is_dropped(tmp_path):
     be = _backend_with_words(tmp_path, ["JAIST", "情報保障", "asrivia", "Agile"])
     be.session.reply = _leaky_reply
     result = be.transcribe(_audio())
-    assert result["text"] == "ね、JAIST"
-    calls = be.session.transcribe_calls
-    assert len(calls) == 2
-    assert _context_of(calls[1]) == ""
+    assert result["text"] == ""
+    assert len(be.session.transcribe_calls) == 1
 
 
-# TC-006-2
+# TC-024-2
 def test_leak_detection_ignores_case_and_width(tmp_path):
     """全角/大文字小文字の違いで漏れを見逃さない(NFKC + 小文字化で照合)。"""
     be = _backend_with_words(tmp_path, ["JAIST", "asrivia", "Agile"])
     be.session.reply = lambda kw: "ＪＡＩＳＴ、ASRIVIA、agile" if kw.get("context") else "x"
-    assert be.transcribe(_audio())["text"] == "x"
+    assert be.transcribe(_audio())["text"] == ""
+    assert len(be.session.transcribe_calls) == 1
 
 
 # TC-007-1
