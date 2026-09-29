@@ -148,9 +148,9 @@ python main.py --backend {mlx|openai|stable-ts|hf|qwen}
   - `openai`: PyTorch版Whisperを使用（クロスプラットフォーム）
   - `stable-ts`: Whisper + Silero VAD（ハルシネーション抑制）
   - `hf`: HuggingFace Whisper + コンテキストバイアシング（専門用語をブースト）
-  - `qwen`: Qwen3-ASR 1.7B（MLX実装）。日本語精度が高く、Python/GitHub等の英字をカタカナ化せず出力できる。Apple Silicon専用、biasing非対応
+  - `qwen`: Qwen3-ASR 1.7B（MLX実装）。日本語精度が高く、Python/GitHub等の英字をカタカナ化せず出力できる。Apple Silicon専用。`words.json` の登録語をプロンプト（context）として渡す
 
-### コンテキストバイアシング（hfバックエンド）
+### コンテキストバイアシング（hf / qwen バックエンド）
 
 頻出する専門用語・固有名詞をリポジトリ直下の `words.json` に登録すると、認識時にそれらの単語が出やすくなります。
 
@@ -164,6 +164,9 @@ python main.py --backend {mlx|openai|stable-ts|hf|qwen}
 - `boost`: 大きいほど強く優先（目安: 1.5〜3.0）
 - ファイルは `mtime` を監視して自動リロードされます
 - PiPウィンドウの `📚` ボタンから登録UIも開けます
+- 効き方はバックエンドで異なります
+  - `hf`: デコード時に登録語のトークンへ加点する（`boost` が効く）
+  - `qwen`: 登録語を並べて Qwen3-ASR のシステムプロンプト（context）に渡す。`boost` は使わない。モデルが単語リストをそのまま出力した場合（短い発話で起こりうる）は、その発話だけ context なしで認識し直す。効果の測定は `benchmarks/qwen-context/` を参照
 
 ### 辞書登録UIのみ起動
 
@@ -317,7 +320,7 @@ python main.py --dynamic-vad --koepus
 - ウィンドウは常に最前面に表示されます
 - `＋`/`－`ボタンでフォントサイズを調整可能（8〜96pt）
 - 入力デバイスのプルダウンからマイク等を切り替え可能
-- `📚` ボタンで辞書登録ウィンドウを開く（hfバックエンド時のみ表示）
+- `📚` ボタンで辞書登録ウィンドウを開く（hf / qwen バックエンド時のみ表示）
 - ウィンドウを閉じるとアプリケーションが終了します
 
 ## トラブルシューティング
@@ -348,17 +351,17 @@ sudo apt update && sudo apt install ffmpeg
 - TranslateGemma（`--translator gemma`）はGPU/MPSがないと処理時間が大きくなります。CPU運用なら `opus`（デフォルト）推奨
 - 初回実行時はモデルのダウンロードに時間がかかります
 
-### バイアシングが効かない（hfバックエンド）
+### バイアシングが効かない（hf / qwen バックエンド）
 
 - `words.json` がリポジトリ直下に存在し、有効なJSON配列になっているか確認
-- `boost` 値が小さすぎる可能性があります（1.5以上を試してください）
+- （hf）`boost` 値が小さすぎる可能性があります（1.5以上を試してください）
 
 ## 制限事項
 
 - mlxバックエンドはApple Silicon Mac専用です
 - TranslateGemmaはローカルで動作するため、マシンスペックによって処理時間が変わります（M4 Max, 128GBで数秒のラグ）
 - 通常モードでは3秒ごとに音声を認識するため、リアルタイム性には若干の遅延があります（`--dynamic-vad`で軽減可能）
-- コンテキストバイアシングはhfバックエンドのみで有効です
+- コンテキストバイアシングは hf / qwen バックエンドのみで有効です
 
 ---
 

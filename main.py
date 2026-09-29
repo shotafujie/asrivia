@@ -162,6 +162,7 @@ def transcribe_audio_thread(audio_q, result_q, lang_mode, enable_translate, back
         asr_model = QwenASRBackend(
             model_name=model_name,
             language=lang_mode,
+            registry_path="words.json",
         )
     else:
         raise ValueError(f"未対応のバックエンド: {backend}")
@@ -427,8 +428,8 @@ def start_pip_window(result_q, stop_ev, backend=None, registry=None, reload_cb=N
         device_menu.config(width=18)
         device_menu.pack(side=tk.LEFT, padx=4)
 
-    # 辞書ボタン（hfバックエンド時のみ表示）
-    if backend == "hf" and registry is not None:
+    # 辞書ボタン（辞書が効くバックエンド: hf / qwen のときのみ表示）
+    if registry is not None:
         from asr.dict_window import DictWindow
         def open_dict_window():
             DictWindow(pip, registry, reload_cb, oov_queue)
@@ -557,7 +558,7 @@ def main():
     parser.add_argument("--translate", action="store_true", help="翻訳も実行する(指定しないと翻訳なし)")
     parser.add_argument("--translator", choices=["opus", "gemma"], default="opus", help="翻訳器: opus=軽量CPU(デフォルト, 高速) gemma=TranslateGemma 4B(高品質, GPU)")
     # mainブランチ準拠: backend/model引数のみ差分
-    parser.add_argument("--backend", choices=["mlx", "openai", "stable-ts", "hf", "qwen"], default="mlx", help="ASRバックエンド: mlx=ローカル(デフォルト) openai=ローカルPyTorch版Whisper stable-ts=Whisper+VAD hf=HuggingFace Whisper+biasing qwen=Qwen3-ASR 1.7B MLX(高精度・biasing非対応)")
+    parser.add_argument("--backend", choices=["mlx", "openai", "stable-ts", "hf", "qwen"], default="mlx", help="ASRバックエンド: mlx=ローカル(デフォルト) openai=ローカルPyTorch版Whisper stable-ts=Whisper+VAD hf=HuggingFace Whisper+biasing qwen=Qwen3-ASR 1.7B MLX(高精度・辞書をcontextで反映)")
     parser.add_argument("--dict", action="store_true", dest="dict_only", help="辞書登録UIのみ起動（ASRなし）")
     parser.add_argument("--model", type=str, default=None, help="使用するモデル名(mlx: HFリポジトリパス、openai: Whisperモデル名)")
     # 動的セグメンテーション関連オプション
@@ -656,8 +657,8 @@ def main():
     else:
         audio2wav.initialize_recorder(mode="fixed")
 
-    # hfバックエンド: UIからregistryを共有するためにここでロード
-    if args.backend == "hf":
+    # hf / qwen バックエンド: UIからregistryを共有するためにここでロード
+    if args.backend in ("hf", "qwen"):
         from asr.biasing import WordRegistry
         hf_registry = WordRegistry.load("words.json")
         # reload_cbはtranscribeスレッド内のbackendに委譲（mtime監視で自動リロード）
