@@ -86,3 +86,34 @@ def test_add_with_reading_registers_reading(launcher):
     dw._on_add()
     assert launcher.registry.get("Claude").reading == "クロード"
     assert dw.reading_entry.get() == ""
+
+
+# TC-025-1
+def test_edit_dialog_shows_current_reading(launcher):
+    launcher.registry.add("Claude Code", reading="くろーどこーど")
+    dw = launcher.open()
+    dlg = dw._on_edit("Claude Code")
+    assert dlg.reading_entry.get() == "くろーどこーど"
+
+
+# TC-025-2
+def test_edit_dialog_reading_empty_when_no_reading(launcher):
+    launcher.registry.add("Agile")
+    dw = launcher.open()
+    dlg = dw._on_edit("Agile")
+    assert dlg.reading_entry.get() == ""
+
+
+# TC-026-1
+def test_edit_dialog_apply_updates_reading_and_boost(launcher, tmp_path):
+    launcher.registry.add("Claude Code", boost=2.0, note="AI", reading="くろーどこーど")
+    dw = launcher.open()
+    dlg = dw._on_edit("Claude Code")
+    dlg.reading_entry.delete(0, tk.END)
+    dlg.reading_entry.insert(0, "くろーどこーど、くらうどこーど")
+    dlg.boost_var.set(3.0)
+    dlg.apply()
+    bw = WordRegistry.load(str(tmp_path / "words.json")).get("Claude Code")
+    assert bw.reading == "くろーどこーど、くらうどこーど"
+    assert bw.boost == 3.0
+    assert bw.note == "AI"

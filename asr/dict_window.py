@@ -141,34 +141,12 @@ class DictWindow:
             self.reload_cb()
         self._refresh_list()
 
-    def _on_edit(self, word: str):
-        """Open a simple dialog to edit boost value."""
+    def _on_edit(self, word: str) -> "_EditDialog | None":
+        """登録済みの語の boost と読みを編集するダイアログを開く。"""
         bw = self.registry.get(word)
         if not bw:
-            return
-
-        dialog = tk.Toplevel(self.win)
-        dialog.title(f"編集: {word}")
-        dialog.geometry("300x150")
-
-        tk.Label(dialog, text=f"単語: {word}").pack(pady=5)
-        tk.Label(dialog, text="boost:").pack()
-        boost_var = tk.DoubleVar(value=bw.boost)
-        scale = tk.Scale(
-            dialog, variable=boost_var,
-            from_=0.5, to=5.0, resolution=0.5,
-            orient=tk.HORIZONTAL, length=200,
-        )
-        scale.pack()
-
-        def apply():
-            self.registry.update_boost(word, boost_var.get())
-            if self.reload_cb:
-                self.reload_cb()
-            self._refresh_list()
-            dialog.destroy()
-
-        tk.Button(dialog, text="適用", command=apply).pack(pady=10)
+            return None
+        return _EditDialog(self, bw)
 
     def _poll_oov(self):
         """Poll OOV candidate queue and display suggestions."""
@@ -216,6 +194,43 @@ class DictWindow:
         self.entry.insert(0, text)
         self.entry.select_range(0, tk.END)
         self.entry.icursor(tk.END)
+
+
+class _EditDialog:
+    """登録済みの語の boost と読みを編集するダイアログ。"""
+
+    def __init__(self, owner: DictWindow, bw):
+        self.owner = owner
+        self.word = bw.word
+        self.dialog = tk.Toplevel(owner.win)
+        self.dialog.title(f"編集: {bw.word}")
+        self.dialog.geometry("360x220")
+
+        tk.Label(self.dialog, text=f"単語: {bw.word}").pack(pady=5)
+        tk.Label(self.dialog, text="boost:").pack()
+        self.boost_var = tk.DoubleVar(value=bw.boost)
+        tk.Scale(
+            self.dialog, variable=self.boost_var,
+            from_=0.5, to=5.0, resolution=0.5,
+            orient=tk.HORIZONTAL, length=200,
+        ).pack()
+
+        tk.Label(self.dialog, text="読み（「,」「、」で複数）:").pack()
+        self.reading_entry = tk.Entry(self.dialog, width=34)
+        self.reading_entry.insert(0, bw.reading)
+        self.reading_entry.pack(padx=10)
+
+        tk.Button(self.dialog, text="適用", command=self.apply).pack(pady=10)
+
+    def apply(self):
+        owner = self.owner
+        owner.registry.update_entry(
+            self.word, self.boost_var.get(), self.reading_entry.get().strip()
+        )
+        if owner.reload_cb:
+            owner.reload_cb()
+        owner._refresh_list()
+        self.dialog.destroy()
 
 
 class DictLauncher:

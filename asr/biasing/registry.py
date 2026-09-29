@@ -65,6 +65,14 @@ class WordRegistry:
             if self._path:
                 self.save()
 
+    def update_entry(self, word: str, boost: float, reading: str):
+        """boost と読みを更新する(メモは保つ)。"""
+        if word in self._words:
+            self._words[word].boost = boost
+            self._words[word].reading = reading
+            if self._path:
+                self.save()
+
     def all(self) -> list[BiasWord]:
         return list(self._words.values())
 
